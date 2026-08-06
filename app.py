@@ -921,7 +921,7 @@ def construire_donnees_hot_pronostics_nhl():
 
     # Snapshot historique
     matches_snapshot = []
-    for m, v in zip(matchs, lignes_victoire.to_dict("records") if not df_victoires.empty else []):
+    for m, v in zip(matchs, lignes_victoire if lignes_victoire else []):
         matches_snapshot.append({
             "game_id": m.get("game_id"),
             "home_name": m["home_name"],
