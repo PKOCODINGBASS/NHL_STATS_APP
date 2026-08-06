@@ -1317,7 +1317,6 @@ with onglets[2]:
     col1, col2 = st.columns([1, 3])
     with col1:
         options_equipes = [f"{abbr} - {nom}" for abbr, nom in sorted(EQUIPES_NHL.items())]
-        # TOR par défaut si présent
         default_opt = next((o for o in options_equipes if o.startswith("TOR -")), options_equipes[0])
         default_index = options_equipes.index(default_opt)
         equipe_selectionnee = st.selectbox(
@@ -1328,7 +1327,10 @@ with onglets[2]:
         )
     equipe_abbr = extraire_abreviation_equipe(equipe_selectionnee)
     with col2:
-        st.caption(f"{len(options_equipes)} équipes NHL · sélection : **{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**")
+        st.caption(
+            f"{len(options_equipes)} équipes NHL · sélection : "
+            f"**{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**"
+        )
 
     render_section_title(
         f"Analyse — {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
@@ -1407,147 +1409,157 @@ with onglets[2]:
             )
 
 # ---- Prédictions du jour ----
-# Comme MLB/KBO : pas de garde `.open` ici, pour réutiliser `equipe_abbr`
-# défini dans l'onglet Analyse (selectbox toujours exécuté).
+# Comme MLB/KBO : pas de garde `.open`, pour réutiliser `equipe_abbr` de l'Analyse.
 with onglets[3]:
     render_section_title(
-    "Prédictions du jour",
-    f"Match de {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
+        "Prédictions du jour",
+        f"Match de {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
     )
     st.caption(
-    "⚠️ Estimations basées sur la forme récente (L10 / saison) et le profil des gardiens. "
-    "À titre informatif uniquement. Changez d'équipe dans l'onglet **Analyse par Équipe**."
+        "⚠️ Estimations basées sur la forme récente (L10 / saison) et le profil des gardiens. "
+        "À titre informatif uniquement. Changez d'équipe dans l'onglet **Analyse par Équipe**."
     )
     with st.spinner("Recherche du match..."):
-    match = obtenir_match_du_jour(equipe_abbr)
+        match = obtenir_match_du_jour(equipe_abbr)
     if not match:
-    st.info(f"Aucun match (jour ou prochain) trouvé pour {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}.")
-    else:
-    if match.get("source") == "prochains":
-        st.info(f"Prochain match détecté ({match['date_ref']}), aucun match aujourd'hui.")
-    lieu = "à domicile" if match["est_domicile"] else "à l'extérieur"
-    render_prediction_match_banner(
-        f"{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)} {lieu} contre {match['adversaire']}",
-        "Gardiens · probabilités · totaux · écart · value",
-    )
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Patinoire", match["venue"])
-    c2.metric("Heure (US Est)", match["heure_us"])
-    c3.metric("Heure (France)", match["heure_paris"])
-    c4.metric("Statut", match["statut"])
-
-    forme_nous = obtenir_forme_equipe(equipe_abbr)
-    forme_adv = obtenir_forme_equipe(match["adversaire_abbr"])
-    gard_nous = obtenir_meilleur_gardien(equipe_abbr)
-    gard_adv = obtenir_meilleur_gardien(match["adversaire_abbr"])
-
-    st.markdown("#### 🧊 Gardiens de référence")
-    g1, g2 = st.columns(2)
-    with g1:
-        st.markdown(f"**{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**")
-        st.markdown(f"### {(gard_nous or {}).get('nom') or 'Non disponible'}")
-        if gard_nous:
-            st.caption(f"GAA {gard_nous['gaa']:.2f} · SV% {gard_nous['sv_pct']:.3f}")
-    with g2:
-        st.markdown(f"**{match['adversaire']}**")
-        st.markdown(f"### {(gard_adv or {}).get('nom') or 'Non disponible'}")
-        if gard_adv:
-            st.caption(f"GAA {gard_adv['gaa']:.2f} · SV% {gard_adv['sv_pct']:.3f}")
-
-    st.markdown("---")
-    st.subheader("🎲 Probabilité de Victoire")
-    pct_nous, pct_adverse = predire_probabilite_victoire(
-        forme_nous.get("gf"),
-        forme_adv.get("gf"),
-        gard_nous,
-        gard_adv,
-        match["est_domicile"],
-    )
-    p1, p2 = st.columns(2)
-    p1.metric(EQUIPES_NHL.get(equipe_abbr, equipe_abbr), f"{pct_nous:.0f}%")
-    p2.metric(match["adversaire"], f"{pct_adverse:.0f}%")
-    st.progress(pct_nous / 100)
-
-    prediction_buts = predire_buts_match(
-        forme_nous.get("gf"), forme_nous.get("ga"), gard_adv
-    )
-    skaters = top_skaters_equipe(equipe_abbr, top_n=12)
-    joueurs = predire_joueurs_du_jour(skaters, gard_adv, top_n=3)
-
-    conseils = generer_recommandation_pari(
-        pct_nous, pct_adverse, gard_nous, gard_adv, prediction_buts, joueurs, ligue="NHL",
-    )
-
-    # Projection MATCH (alignée Hot Pronostics)
-    if match["est_domicile"]:
-        buts_home, buts_away, *_ = _projeter_buts_equipes(equipe_abbr, match["adversaire_abbr"])
-    else:
-        buts_home, buts_away, *_ = _projeter_buts_equipes(match["adversaire_abbr"], equipe_abbr)
-    total_match_hot = _total_buts_predit(buts_home, buts_away)
-    total_vue = prediction_buts.get("total_match") if prediction_buts else None
-    ligne_ou = obtenir_ligne_over_under_saison()
-    classement_match = classer_recommandation_totaux_over_under(total_match_hot, ligne_ou)
-    classement_vue = classer_recommandation_totaux_over_under(total_vue, ligne_ou)
-    reco_totaux = formater_recommandation_totaux_over_under(total_match_hot, ligne_ou)
-
-    ecart = _ecart_points_predit(buts_home, buts_away)
-    # Écart du point de vue de l'équipe sélectionnée
-    if match["est_domicile"]:
-        info_ecart = formater_ecart_points(ecart, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), match["adversaire"], pct_nous, pct_adverse)
-    else:
-        info_ecart = formater_ecart_points(ecart, match["adversaire"], EQUIPES_NHL.get(equipe_abbr, equipe_abbr), pct_adverse, pct_nous)
-
-    lignes_reco = _filtrer_phrases_over_under_conseils(conseils)
-    if reco_totaux:
-        lignes_reco.append(reco_totaux)
-    if info_ecart:
-        lignes_reco.append(
-            f"📏 **Écart de points possible :** {info_ecart.get('ecart_label')} — {info_ecart.get('ecart_resume')}"
+        st.info(
+            f"Aucun match (jour ou prochain) trouvé pour "
+            f"{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}."
         )
-    if lignes_reco:
-        st.info("**💡 Recommandation de Pari Optimisée**\n\n" + "\n\n".join(lignes_reco))
+    else:
+        if match.get("source") == "prochains":
+            st.info(f"Prochain match détecté ({match['date_ref']}), aucun match aujourd'hui.")
+        lieu = "à domicile" if match["est_domicile"] else "à l'extérieur"
+        render_prediction_match_banner(
+            f"{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)} {lieu} contre {match['adversaire']}",
+            "Gardiens · probabilités · totaux · écart · value",
+        )
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Patinoire", match["venue"])
+        c2.metric("Heure (US Est)", match["heure_us"])
+        c3.metric("Heure (France)", match["heure_paris"])
+        c4.metric("Statut", match["statut"])
 
-    afficher_outil_coherence_totaux(
-        total_match_hot,
-        total_vue,
-        ligne_ou,
-        code_match=classement_match["code"] if classement_match else None,
-        code_vue=classement_vue["code"] if classement_vue else None,
-    )
+        forme_nous = obtenir_forme_equipe(equipe_abbr)
+        forme_adv = obtenir_forme_equipe(match["adversaire_abbr"])
+        gard_nous = obtenir_meilleur_gardien(equipe_abbr)
+        gard_adv = obtenir_meilleur_gardien(match["adversaire_abbr"])
 
-    # Value bet
-    cle = _lire_cle_odds_api()
-    if cle:
-        home_n = EQUIPES_NHL.get(match["home_abbr"], match["home_abbr"])
-        away_n = EQUIPES_NHL.get(match["away_abbr"], match["away_abbr"])
-        cotes = obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle)
-        cm = trouver_cote_du_match(cotes, home_n, away_n)
-        if cm:
-            cote_nous = cm["cote_nous"] if match["est_domicile"] else cm["cote_adverse"]
-            niveau, msg = evaluer_value_bet(pct_nous, cote_nous, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), cm["bookmaker"])
-            afficher_badge_value_bet(niveau, msg)
+        st.markdown("#### 🧊 Gardiens de référence")
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown(f"**{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**")
+            st.markdown(f"### {(gard_nous or {}).get('nom') or 'Non disponible'}")
+            if gard_nous:
+                st.caption(f"GAA {gard_nous['gaa']:.2f} · SV% {gard_nous['sv_pct']:.3f}")
+        with g2:
+            st.markdown(f"**{match['adversaire']}**")
+            st.markdown(f"### {(gard_adv or {}).get('nom') or 'Non disponible'}")
+            if gard_adv:
+                st.caption(f"GAA {gard_adv['gaa']:.2f} · SV% {gard_adv['sv_pct']:.3f}")
+
+        st.markdown("---")
+        st.subheader("🎲 Probabilité de Victoire")
+        pct_nous, pct_adverse = predire_probabilite_victoire(
+            forme_nous.get("gf"),
+            forme_adv.get("gf"),
+            gard_nous,
+            gard_adv,
+            match["est_domicile"],
+        )
+        p1, p2 = st.columns(2)
+        p1.metric(EQUIPES_NHL.get(equipe_abbr, equipe_abbr), f"{pct_nous:.0f}%")
+        p2.metric(match["adversaire"], f"{pct_adverse:.0f}%")
+        st.progress(pct_nous / 100)
+
+        prediction_buts = predire_buts_match(
+            forme_nous.get("gf"), forme_nous.get("ga"), gard_adv
+        )
+        skaters = top_skaters_equipe(equipe_abbr, top_n=12)
+        joueurs = predire_joueurs_du_jour(skaters, gard_adv, top_n=3)
+
+        conseils = generer_recommandation_pari(
+            pct_nous, pct_adverse, gard_nous, gard_adv, prediction_buts, joueurs, ligue="NHL",
+        )
+
+        if match["est_domicile"]:
+            buts_home, buts_away, *_ = _projeter_buts_equipes(equipe_abbr, match["adversaire_abbr"])
         else:
-            st.caption("Cotes moneyline introuvables pour ce match (Odds API).")
-    else:
-        st.caption("Ajoutez `[odds_api] api_key` dans `.streamlit/secrets.toml` pour le Value Bet.")
+            buts_home, buts_away, *_ = _projeter_buts_equipes(match["adversaire_abbr"], equipe_abbr)
+        total_match_hot = _total_buts_predit(buts_home, buts_away)
+        total_vue = prediction_buts.get("total_match") if prediction_buts else None
+        ligne_ou = obtenir_ligne_over_under_saison()
+        classement_match = classer_recommandation_totaux_over_under(total_match_hot, ligne_ou)
+        classement_vue = classer_recommandation_totaux_over_under(total_vue, ligne_ou)
+        reco_totaux = formater_recommandation_totaux_over_under(total_match_hot, ligne_ou)
 
-    st.markdown("---")
-    st.subheader("🏒 Prédiction des buts")
-    if prediction_buts:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Buts estimés (équipe)", prediction_buts["buts_equipe"])
-        m2.metric("Total buts estimé (match)", prediction_buts["total_match"])
-        m3.metric("Confiance", prediction_buts["confiance"])
-        st.caption(
-            f"Projection match Hot : **{total_match_hot}** buts · "
-            f"écart domicile−extérieur : **{ecart:+.1f}**" if total_match_hot is not None and ecart is not None
-            else "Projection match indisponible."
+        ecart = _ecart_points_predit(buts_home, buts_away)
+        if match["est_domicile"]:
+            info_ecart = formater_ecart_points(
+                ecart, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), match["adversaire"], pct_nous, pct_adverse
+            )
+        else:
+            info_ecart = formater_ecart_points(
+                ecart, match["adversaire"], EQUIPES_NHL.get(equipe_abbr, equipe_abbr), pct_adverse, pct_nous
+            )
+
+        lignes_reco = _filtrer_phrases_over_under_conseils(conseils)
+        if reco_totaux:
+            lignes_reco.append(reco_totaux)
+        if info_ecart:
+            lignes_reco.append(
+                f"📏 **Écart de points possible :** {info_ecart.get('ecart_label')} — "
+                f"{info_ecart.get('ecart_resume')}"
+            )
+        if lignes_reco:
+            st.info("**💡 Recommandation de Pari Optimisée**\n\n" + "\n\n".join(lignes_reco))
+
+        afficher_outil_coherence_totaux(
+            total_match_hot,
+            total_vue,
+            ligne_ou,
+            code_match=classement_match["code"] if classement_match else None,
+            code_vue=classement_vue["code"] if classement_vue else None,
         )
 
-    st.subheader("⭐ Joueurs à surveiller")
-    if not joueurs:
-        st.info("Pas assez de données joueurs.")
-    else:
-        st.dataframe(pd.DataFrame(joueurs), hide_index=True)
+        cle = _lire_cle_odds_api()
+        if cle:
+            home_n = EQUIPES_NHL.get(match["home_abbr"], match["home_abbr"])
+            away_n = EQUIPES_NHL.get(match["away_abbr"], match["away_abbr"])
+            cotes = obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle)
+            cm = trouver_cote_du_match(cotes, home_n, away_n)
+            if cm:
+                cote_nous = cm["cote_nous"] if match["est_domicile"] else cm["cote_adverse"]
+                niveau, msg = evaluer_value_bet(
+                    pct_nous, cote_nous, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), cm["bookmaker"]
+                )
+                afficher_badge_value_bet(niveau, msg)
+            else:
+                st.caption("Cotes moneyline introuvables pour ce match (Odds API).")
+        else:
+            st.caption(
+                "Ajoutez `[odds_api] api_key` dans `.streamlit/secrets.toml` pour le Value Bet."
+            )
+
+        st.markdown("---")
+        st.subheader("🏒 Prédiction des buts")
+        if prediction_buts:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Buts estimés (équipe)", prediction_buts["buts_equipe"])
+            m2.metric("Total buts estimé (match)", prediction_buts["total_match"])
+            m3.metric("Confiance", prediction_buts["confiance"])
+            if total_match_hot is not None and ecart is not None:
+                st.caption(
+                    f"Projection match Hot : **{total_match_hot}** buts · "
+                    f"écart domicile−extérieur : **{ecart:+.1f}**"
+                )
+            else:
+                st.caption("Projection match indisponible.")
+
+        st.subheader("⭐ Joueurs à surveiller")
+        if not joueurs:
+            st.info("Pas assez de données joueurs.")
+        else:
+            st.dataframe(pd.DataFrame(joueurs), hide_index=True)
 
 render_footer("NHL", datetime.now(TZ_PARIS).strftime("%d/%m/%Y %H:%M"))
