@@ -160,6 +160,13 @@ def _normaliser_nom(texte: str) -> str:
     return "".join(ch.lower() for ch in texte if ch.isalnum())
 
 
+def extraire_abreviation_equipe(selection: str) -> str:
+    """Extrait 'TOR' depuis une option 'TOR - Toronto Maple Leafs'."""
+    if not selection:
+        return "TOR"
+    return str(selection).split(" - ", 1)[0].strip().upper()
+
+
 st.set_page_config(
     page_title="Analyse NHL - Buteurs & Passeurs",
     page_icon="🏒",
@@ -1151,36 +1158,12 @@ render_page_header(
     league="nhl",
 )
 
-try:
-    EQUIPES_NHL = get_teams_nhl_dict()
-except Exception:
-    EQUIPES_NHL = dict(TEAMS_NHL)
-if len(EQUIPES_NHL) < len(TEAMS_NHL):
-    # Filet de sécurité : ne jamais n'afficher qu'une seule franchise
-    merged = dict(TEAMS_NHL)
-    merged.update(EQUIPES_NHL)
-    EQUIPES_NHL = merged
-
-try:
-    saison_id = saison_stats_courante()
-except Exception:
-    saison_id = None
+# Liste des 32 équipes : constante locale (comme KBO) — pas d'appel réseau
+# avant le menu, pour que le selectbox s'affiche immédiatement.
+EQUIPES_NHL = dict(TEAMS_NHL)
 
 with st.sidebar:
     st.header("⚙️ Paramètres")
-    abbrs = sorted(EQUIPES_NHL.keys())
-    if not abbrs:
-        abbrs = sorted(TEAMS_NHL.keys())
-        EQUIPES_NHL = dict(TEAMS_NHL)
-    default_idx = abbrs.index("TOR") if "TOR" in abbrs else 0
-    equipe_abbr = st.selectbox(
-        "Sélectionnez une équipe:",
-        options=abbrs,
-        format_func=lambda a: f"{a} — {EQUIPES_NHL.get(a, TEAMS_NHL.get(a, a))}",
-        index=default_idx,
-    )
-    st.caption(f"{len(abbrs)} équipes NHL")
-    st.markdown("---")
     st.markdown("**Légende:**")
     st.markdown("""
     - **Buteur** : joueur susceptible de marquer un but
@@ -1189,8 +1172,11 @@ with st.sidebar:
     - **GAA / SV%** : Moyenne de buts encaissés / % d'arrêts
     - **Écart** : différence de buts projetée (spread)
     """)
-    if saison_id:
-        st.caption(f"Saison stats : {saison_id}")
+    st.caption(f"{len(EQUIPES_NHL)} franchises NHL")
+    try:
+        st.caption(f"Saison stats : {saison_stats_courante()}")
+    except Exception:
+        pass
 
 onglets = st.tabs([
     "📊 Résumé",
@@ -1323,213 +1309,245 @@ with onglets[1]:
             st.dataframe(df_victoires, hide_index=True)
 
 # ---- Analyse par équipe ----
+# IMPORTANT (comme MLB/KBO) : le selectbox d'équipe est HORS du garde `.open`
+# pour qu'il s'affiche toujours et que `equipe_abbr` existe pour Prédictions.
 with onglets[2]:
-    if onglets[2].open:
-        render_section_title(
-            f"Analyse — {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
-            "Classement, gardiens et production offensive",
-        )
-        df_stand = obtenir_standings_nhl()
-        row = df_stand[df_stand["abbr"] == equipe_abbr]
-        if row.empty:
-            st.warning("Équipe introuvable dans les standings NHL.")
-        else:
-            r = row.iloc[0]
-            c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("Points", int(r["pts"]))
-            c2.metric("Fiche", f"{int(r['w'])}-{int(r['l'])}-{int(r['otl'])}")
-            c3.metric("GF / match", f"{r['gf_pg']:.2f}")
-            c4.metric("GA / match", f"{r['ga_pg']:.2f}")
-            c5.metric("Diff", int(r["gf"] - r["ga"]))
-            st.caption(f"{r['conference']} · {r['division']} · forme L10 : {int(r['l10_w'])}-{int(r['l10_gp'])-int(r['l10_w'])} (approx)")
+    st.header("📊 Analyse par Équipe")
 
-            forme = obtenir_forme_equipe(equipe_abbr)
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        options_equipes = [f"{abbr} - {nom}" for abbr, nom in sorted(EQUIPES_NHL.items())]
+        # TOR par défaut si présent
+        default_opt = next((o for o in options_equipes if o.startswith("TOR -")), options_equipes[0])
+        default_index = options_equipes.index(default_opt)
+        equipe_selectionnee = st.selectbox(
+            "Choisissez une équipe:",
+            options=options_equipes,
+            index=default_index,
+            key="nhl_equipe_select",
+        )
+    equipe_abbr = extraire_abreviation_equipe(equipe_selectionnee)
+    with col2:
+        st.caption(f"{len(options_equipes)} équipes NHL · sélection : **{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**")
+
+    render_section_title(
+        f"Analyse — {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
+        "Classement, gardiens et production offensive",
+    )
+    df_stand = obtenir_standings_nhl()
+    row = df_stand[df_stand["abbr"] == equipe_abbr] if not df_stand.empty else pd.DataFrame()
+    if row.empty:
+        st.warning(
+            "Standings NHL momentanément indisponibles pour cette équipe — "
+            "le menu reste utilisable ; réessayez dans un instant."
+        )
+        forme = obtenir_forme_equipe(equipe_abbr)
+        if forme.get("gf") is not None:
             st.info(
-                f"Forme utilisée pour les prédictions ({forme['source']}) : "
+                f"Forme ({forme['source']}) : "
                 f"**{forme['gf']:.2f}** GF/match · **{forme['ga']:.2f}** GA/match"
             )
+    else:
+        r = row.iloc[0]
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Points", int(r["pts"]))
+        c2.metric("Fiche", f"{int(r['w'])}-{int(r['l'])}-{int(r['otl'])}")
+        c3.metric("GF / match", f"{r['gf_pg']:.2f}")
+        c4.metric("GA / match", f"{r['ga_pg']:.2f}")
+        c5.metric("Diff", int(r["gf"] - r["ga"]))
+        st.caption(
+            f"{r['conference']} · {r['division']} · forme L10 : "
+            f"{int(r['l10_w'])}-{int(r['l10_gp']) - int(r['l10_w'])} (approx)"
+        )
 
-            gard = obtenir_meilleur_gardien(equipe_abbr)
-            if gard:
-                st.subheader("🧊 Gardien de référence")
-                st.markdown(
-                    f"**{gard['nom']}** — GAA {gard['gaa']:.2f} · SV% {gard['sv_pct']:.3f} · "
-                    f"{gard['wins']} V en {gard['starts']} départs"
-                )
+        forme = obtenir_forme_equipe(equipe_abbr)
+        st.info(
+            f"Forme utilisée pour les prédictions ({forme['source']}) : "
+            f"**{forme['gf']:.2f}** GF/match · **{forme['ga']:.2f}** GA/match"
+        )
 
-            st.subheader("📈 Top skaters (saison + forme 10 matchs)")
-            skaters = top_skaters_equipe(equipe_abbr, top_n=15)
-            if not skaters:
-                st.info("Stats skaters indisponibles.")
-            else:
-                df_s = pd.DataFrame(skaters)
-                st.dataframe(
-                    df_s[[
-                        "nom", "poste", "gp_saison", "goals_saison", "assists_saison",
-                        "points_saison", "goals_10", "assists_10", "points_10",
-                    ]].rename(columns={
-                        "nom": "Joueur", "poste": "Poste", "gp_saison": "MJ",
-                        "goals_saison": "B", "assists_saison": "A", "points_saison": "Pts",
-                        "goals_10": "B (10)", "assists_10": "A (10)", "points_10": "Pts (10)",
-                    }),
-                    hide_index=True,
-                )
-                chart_df = df_s.head(8).melt(
-                    id_vars=["nom"], value_vars=["goals_10", "assists_10"],
-                    var_name="type", value_name="n",
-                )
-                chart_df["type"] = chart_df["type"].map({"goals_10": "Buts", "assists_10": "Passes"})
-                st.altair_chart(
-                    alt.Chart(chart_df).mark_bar().encode(
-                        x=alt.X("nom:N", sort="-y", title=None),
-                        y=alt.Y("n:Q", title="Sur 10 matchs"),
-                        color=alt.Color("type:N", title=None),
-                        tooltip=["nom", "type", "n"],
-                    ).properties(height=280),
-                    use_container_width=True,
-                )
+        gard = obtenir_meilleur_gardien(equipe_abbr)
+        if gard:
+            st.subheader("🧊 Gardien de référence")
+            st.markdown(
+                f"**{gard['nom']}** — GAA {gard['gaa']:.2f} · SV% {gard['sv_pct']:.3f} · "
+                f"{gard['wins']} V en {gard['starts']} départs"
+            )
+
+        st.subheader("📈 Top skaters (saison + forme 10 matchs)")
+        skaters = top_skaters_equipe(equipe_abbr, top_n=15)
+        if not skaters:
+            st.info("Stats skaters indisponibles.")
+        else:
+            df_s = pd.DataFrame(skaters)
+            st.dataframe(
+                df_s[[
+                    "nom", "poste", "gp_saison", "goals_saison", "assists_saison",
+                    "points_saison", "goals_10", "assists_10", "points_10",
+                ]].rename(columns={
+                    "nom": "Joueur", "poste": "Poste", "gp_saison": "MJ",
+                    "goals_saison": "B", "assists_saison": "A", "points_saison": "Pts",
+                    "goals_10": "B (10)", "assists_10": "A (10)", "points_10": "Pts (10)",
+                }),
+                hide_index=True,
+            )
+            chart_df = df_s.head(8).melt(
+                id_vars=["nom"], value_vars=["goals_10", "assists_10"],
+                var_name="type", value_name="n",
+            )
+            chart_df["type"] = chart_df["type"].map({"goals_10": "Buts", "assists_10": "Passes"})
+            st.altair_chart(
+                alt.Chart(chart_df).mark_bar().encode(
+                    x=alt.X("nom:N", sort="-y", title=None),
+                    y=alt.Y("n:Q", title="Sur 10 matchs"),
+                    color=alt.Color("type:N", title=None),
+                    tooltip=["nom", "type", "n"],
+                ).properties(height=280),
+                use_container_width=True,
+            )
 
 # ---- Prédictions du jour ----
+# Comme MLB/KBO : pas de garde `.open` ici, pour réutiliser `equipe_abbr`
+# défini dans l'onglet Analyse (selectbox toujours exécuté).
 with onglets[3]:
-    if onglets[3].open:
-        render_section_title(
-            "Prédictions du jour",
-            f"Match de {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
+    render_section_title(
+    "Prédictions du jour",
+    f"Match de {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}",
+    )
+    st.caption(
+    "⚠️ Estimations basées sur la forme récente (L10 / saison) et le profil des gardiens. "
+    "À titre informatif uniquement. Changez d'équipe dans l'onglet **Analyse par Équipe**."
+    )
+    with st.spinner("Recherche du match..."):
+    match = obtenir_match_du_jour(equipe_abbr)
+    if not match:
+    st.info(f"Aucun match (jour ou prochain) trouvé pour {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}.")
+    else:
+    if match.get("source") == "prochains":
+        st.info(f"Prochain match détecté ({match['date_ref']}), aucun match aujourd'hui.")
+    lieu = "à domicile" if match["est_domicile"] else "à l'extérieur"
+    render_prediction_match_banner(
+        f"{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)} {lieu} contre {match['adversaire']}",
+        "Gardiens · probabilités · totaux · écart · value",
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Patinoire", match["venue"])
+    c2.metric("Heure (US Est)", match["heure_us"])
+    c3.metric("Heure (France)", match["heure_paris"])
+    c4.metric("Statut", match["statut"])
+
+    forme_nous = obtenir_forme_equipe(equipe_abbr)
+    forme_adv = obtenir_forme_equipe(match["adversaire_abbr"])
+    gard_nous = obtenir_meilleur_gardien(equipe_abbr)
+    gard_adv = obtenir_meilleur_gardien(match["adversaire_abbr"])
+
+    st.markdown("#### 🧊 Gardiens de référence")
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown(f"**{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**")
+        st.markdown(f"### {(gard_nous or {}).get('nom') or 'Non disponible'}")
+        if gard_nous:
+            st.caption(f"GAA {gard_nous['gaa']:.2f} · SV% {gard_nous['sv_pct']:.3f}")
+    with g2:
+        st.markdown(f"**{match['adversaire']}**")
+        st.markdown(f"### {(gard_adv or {}).get('nom') or 'Non disponible'}")
+        if gard_adv:
+            st.caption(f"GAA {gard_adv['gaa']:.2f} · SV% {gard_adv['sv_pct']:.3f}")
+
+    st.markdown("---")
+    st.subheader("🎲 Probabilité de Victoire")
+    pct_nous, pct_adverse = predire_probabilite_victoire(
+        forme_nous.get("gf"),
+        forme_adv.get("gf"),
+        gard_nous,
+        gard_adv,
+        match["est_domicile"],
+    )
+    p1, p2 = st.columns(2)
+    p1.metric(EQUIPES_NHL.get(equipe_abbr, equipe_abbr), f"{pct_nous:.0f}%")
+    p2.metric(match["adversaire"], f"{pct_adverse:.0f}%")
+    st.progress(pct_nous / 100)
+
+    prediction_buts = predire_buts_match(
+        forme_nous.get("gf"), forme_nous.get("ga"), gard_adv
+    )
+    skaters = top_skaters_equipe(equipe_abbr, top_n=12)
+    joueurs = predire_joueurs_du_jour(skaters, gard_adv, top_n=3)
+
+    conseils = generer_recommandation_pari(
+        pct_nous, pct_adverse, gard_nous, gard_adv, prediction_buts, joueurs, ligue="NHL",
+    )
+
+    # Projection MATCH (alignée Hot Pronostics)
+    if match["est_domicile"]:
+        buts_home, buts_away, *_ = _projeter_buts_equipes(equipe_abbr, match["adversaire_abbr"])
+    else:
+        buts_home, buts_away, *_ = _projeter_buts_equipes(match["adversaire_abbr"], equipe_abbr)
+    total_match_hot = _total_buts_predit(buts_home, buts_away)
+    total_vue = prediction_buts.get("total_match") if prediction_buts else None
+    ligne_ou = obtenir_ligne_over_under_saison()
+    classement_match = classer_recommandation_totaux_over_under(total_match_hot, ligne_ou)
+    classement_vue = classer_recommandation_totaux_over_under(total_vue, ligne_ou)
+    reco_totaux = formater_recommandation_totaux_over_under(total_match_hot, ligne_ou)
+
+    ecart = _ecart_points_predit(buts_home, buts_away)
+    # Écart du point de vue de l'équipe sélectionnée
+    if match["est_domicile"]:
+        info_ecart = formater_ecart_points(ecart, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), match["adversaire"], pct_nous, pct_adverse)
+    else:
+        info_ecart = formater_ecart_points(ecart, match["adversaire"], EQUIPES_NHL.get(equipe_abbr, equipe_abbr), pct_adverse, pct_nous)
+
+    lignes_reco = _filtrer_phrases_over_under_conseils(conseils)
+    if reco_totaux:
+        lignes_reco.append(reco_totaux)
+    if info_ecart:
+        lignes_reco.append(
+            f"📏 **Écart de points possible :** {info_ecart.get('ecart_label')} — {info_ecart.get('ecart_resume')}"
         )
-        st.caption(
-            "⚠️ Estimations basées sur la forme récente (L10 / saison) et le profil des gardiens. "
-            "À titre informatif uniquement."
-        )
-        with st.spinner("Recherche du match..."):
-            match = obtenir_match_du_jour(equipe_abbr)
-        if not match:
-            st.info(f"Aucun match (jour ou prochain) trouvé pour {EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}.")
+    if lignes_reco:
+        st.info("**💡 Recommandation de Pari Optimisée**\n\n" + "\n\n".join(lignes_reco))
+
+    afficher_outil_coherence_totaux(
+        total_match_hot,
+        total_vue,
+        ligne_ou,
+        code_match=classement_match["code"] if classement_match else None,
+        code_vue=classement_vue["code"] if classement_vue else None,
+    )
+
+    # Value bet
+    cle = _lire_cle_odds_api()
+    if cle:
+        home_n = EQUIPES_NHL.get(match["home_abbr"], match["home_abbr"])
+        away_n = EQUIPES_NHL.get(match["away_abbr"], match["away_abbr"])
+        cotes = obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle)
+        cm = trouver_cote_du_match(cotes, home_n, away_n)
+        if cm:
+            cote_nous = cm["cote_nous"] if match["est_domicile"] else cm["cote_adverse"]
+            niveau, msg = evaluer_value_bet(pct_nous, cote_nous, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), cm["bookmaker"])
+            afficher_badge_value_bet(niveau, msg)
         else:
-            if match.get("source") == "prochains":
-                st.info(f"Prochain match détecté ({match['date_ref']}), aucun match aujourd'hui.")
-            lieu = "à domicile" if match["est_domicile"] else "à l'extérieur"
-            render_prediction_match_banner(
-                f"{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)} {lieu} contre {match['adversaire']}",
-                "Gardiens · probabilités · totaux · écart · value",
-            )
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Patinoire", match["venue"])
-            c2.metric("Heure (US Est)", match["heure_us"])
-            c3.metric("Heure (France)", match["heure_paris"])
-            c4.metric("Statut", match["statut"])
+            st.caption("Cotes moneyline introuvables pour ce match (Odds API).")
+    else:
+        st.caption("Ajoutez `[odds_api] api_key` dans `.streamlit/secrets.toml` pour le Value Bet.")
 
-            forme_nous = obtenir_forme_equipe(equipe_abbr)
-            forme_adv = obtenir_forme_equipe(match["adversaire_abbr"])
-            gard_nous = obtenir_meilleur_gardien(equipe_abbr)
-            gard_adv = obtenir_meilleur_gardien(match["adversaire_abbr"])
+    st.markdown("---")
+    st.subheader("🏒 Prédiction des buts")
+    if prediction_buts:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Buts estimés (équipe)", prediction_buts["buts_equipe"])
+        m2.metric("Total buts estimé (match)", prediction_buts["total_match"])
+        m3.metric("Confiance", prediction_buts["confiance"])
+        st.caption(
+            f"Projection match Hot : **{total_match_hot}** buts · "
+            f"écart domicile−extérieur : **{ecart:+.1f}**" if total_match_hot is not None and ecart is not None
+            else "Projection match indisponible."
+        )
 
-            st.markdown("#### 🧊 Gardiens de référence")
-            g1, g2 = st.columns(2)
-            with g1:
-                st.markdown(f"**{EQUIPES_NHL.get(equipe_abbr, equipe_abbr)}**")
-                st.markdown(f"### {(gard_nous or {}).get('nom') or 'Non disponible'}")
-                if gard_nous:
-                    st.caption(f"GAA {gard_nous['gaa']:.2f} · SV% {gard_nous['sv_pct']:.3f}")
-            with g2:
-                st.markdown(f"**{match['adversaire']}**")
-                st.markdown(f"### {(gard_adv or {}).get('nom') or 'Non disponible'}")
-                if gard_adv:
-                    st.caption(f"GAA {gard_adv['gaa']:.2f} · SV% {gard_adv['sv_pct']:.3f}")
-
-            st.markdown("---")
-            st.subheader("🎲 Probabilité de Victoire")
-            pct_nous, pct_adverse = predire_probabilite_victoire(
-                forme_nous.get("gf"),
-                forme_adv.get("gf"),
-                gard_nous,
-                gard_adv,
-                match["est_domicile"],
-            )
-            p1, p2 = st.columns(2)
-            p1.metric(EQUIPES_NHL.get(equipe_abbr, equipe_abbr), f"{pct_nous:.0f}%")
-            p2.metric(match["adversaire"], f"{pct_adverse:.0f}%")
-            st.progress(pct_nous / 100)
-
-            prediction_buts = predire_buts_match(
-                forme_nous.get("gf"), forme_nous.get("ga"), gard_adv
-            )
-            skaters = top_skaters_equipe(equipe_abbr, top_n=12)
-            joueurs = predire_joueurs_du_jour(skaters, gard_adv, top_n=3)
-
-            conseils = generer_recommandation_pari(
-                pct_nous, pct_adverse, gard_nous, gard_adv, prediction_buts, joueurs, ligue="NHL",
-            )
-
-            # Projection MATCH (alignée Hot Pronostics)
-            if match["est_domicile"]:
-                buts_home, buts_away, *_ = _projeter_buts_equipes(equipe_abbr, match["adversaire_abbr"])
-            else:
-                buts_home, buts_away, *_ = _projeter_buts_equipes(match["adversaire_abbr"], equipe_abbr)
-            total_match_hot = _total_buts_predit(buts_home, buts_away)
-            total_vue = prediction_buts.get("total_match") if prediction_buts else None
-            ligne_ou = obtenir_ligne_over_under_saison()
-            classement_match = classer_recommandation_totaux_over_under(total_match_hot, ligne_ou)
-            classement_vue = classer_recommandation_totaux_over_under(total_vue, ligne_ou)
-            reco_totaux = formater_recommandation_totaux_over_under(total_match_hot, ligne_ou)
-
-            ecart = _ecart_points_predit(buts_home, buts_away)
-            # Écart du point de vue de l'équipe sélectionnée
-            if match["est_domicile"]:
-                info_ecart = formater_ecart_points(ecart, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), match["adversaire"], pct_nous, pct_adverse)
-            else:
-                info_ecart = formater_ecart_points(ecart, match["adversaire"], EQUIPES_NHL.get(equipe_abbr, equipe_abbr), pct_adverse, pct_nous)
-
-            lignes_reco = _filtrer_phrases_over_under_conseils(conseils)
-            if reco_totaux:
-                lignes_reco.append(reco_totaux)
-            if info_ecart:
-                lignes_reco.append(
-                    f"📏 **Écart de points possible :** {info_ecart.get('ecart_label')} — {info_ecart.get('ecart_resume')}"
-                )
-            if lignes_reco:
-                st.info("**💡 Recommandation de Pari Optimisée**\n\n" + "\n\n".join(lignes_reco))
-
-            afficher_outil_coherence_totaux(
-                total_match_hot,
-                total_vue,
-                ligne_ou,
-                code_match=classement_match["code"] if classement_match else None,
-                code_vue=classement_vue["code"] if classement_vue else None,
-            )
-
-            # Value bet
-            cle = _lire_cle_odds_api()
-            if cle:
-                home_n = EQUIPES_NHL.get(match["home_abbr"], match["home_abbr"])
-                away_n = EQUIPES_NHL.get(match["away_abbr"], match["away_abbr"])
-                cotes = obtenir_cotes_moneyline_du_jour(ODDS_API_SPORT_KEY, cle)
-                cm = trouver_cote_du_match(cotes, home_n, away_n)
-                if cm:
-                    cote_nous = cm["cote_nous"] if match["est_domicile"] else cm["cote_adverse"]
-                    niveau, msg = evaluer_value_bet(pct_nous, cote_nous, EQUIPES_NHL.get(equipe_abbr, equipe_abbr), cm["bookmaker"])
-                    afficher_badge_value_bet(niveau, msg)
-                else:
-                    st.caption("Cotes moneyline introuvables pour ce match (Odds API).")
-            else:
-                st.caption("Ajoutez `[odds_api] api_key` dans `.streamlit/secrets.toml` pour le Value Bet.")
-
-            st.markdown("---")
-            st.subheader("🏒 Prédiction des buts")
-            if prediction_buts:
-                m1, m2, m3 = st.columns(3)
-                m1.metric("Buts estimés (équipe)", prediction_buts["buts_equipe"])
-                m2.metric("Total buts estimé (match)", prediction_buts["total_match"])
-                m3.metric("Confiance", prediction_buts["confiance"])
-                st.caption(
-                    f"Projection match Hot : **{total_match_hot}** buts · "
-                    f"écart domicile−extérieur : **{ecart:+.1f}**" if total_match_hot is not None and ecart is not None
-                    else "Projection match indisponible."
-                )
-
-            st.subheader("⭐ Joueurs à surveiller")
-            if not joueurs:
-                st.info("Pas assez de données joueurs.")
-            else:
-                st.dataframe(pd.DataFrame(joueurs), hide_index=True)
+    st.subheader("⭐ Joueurs à surveiller")
+    if not joueurs:
+        st.info("Pas assez de données joueurs.")
+    else:
+        st.dataframe(pd.DataFrame(joueurs), hide_index=True)
 
 render_footer("NHL", datetime.now(TZ_PARIS).strftime("%d/%m/%Y %H:%M"))
