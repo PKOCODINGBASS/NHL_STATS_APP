@@ -65,6 +65,43 @@ TZ_EASTERN = ZoneInfo("America/New_York")
 TZ_PARIS = ZoneInfo("Europe/Paris")
 ODDS_API_SPORT_KEY = "icehockey_nhl"
 LIGUE_PAR_DEFAUT = "NHL"
+
+# Liste canonique des 32 franchises NHL (menu déroulant toujours complet,
+# même si l'endpoint standings est indisponible / en cache vide sur Cloud).
+TEAMS_NHL = {
+    "ANA": "Anaheim Ducks",
+    "BOS": "Boston Bruins",
+    "BUF": "Buffalo Sabres",
+    "CAR": "Carolina Hurricanes",
+    "CBJ": "Columbus Blue Jackets",
+    "CGY": "Calgary Flames",
+    "CHI": "Chicago Blackhawks",
+    "COL": "Colorado Avalanche",
+    "DAL": "Dallas Stars",
+    "DET": "Detroit Red Wings",
+    "EDM": "Edmonton Oilers",
+    "FLA": "Florida Panthers",
+    "LAK": "Los Angeles Kings",
+    "MIN": "Minnesota Wild",
+    "MTL": "Montreal Canadiens",
+    "NJD": "New Jersey Devils",
+    "NSH": "Nashville Predators",
+    "NYI": "New York Islanders",
+    "NYR": "New York Rangers",
+    "OTT": "Ottawa Senators",
+    "PHI": "Philadelphia Flyers",
+    "PIT": "Pittsburgh Penguins",
+    "SEA": "Seattle Kraken",
+    "SJS": "San Jose Sharks",
+    "STL": "St. Louis Blues",
+    "TBL": "Tampa Bay Lightning",
+    "TOR": "Toronto Maple Leafs",
+    "UTA": "Utah Hockey Club",
+    "VAN": "Vancouver Canucks",
+    "VGK": "Vegas Golden Knights",
+    "WPG": "Winnipeg Jets",
+    "WSH": "Washington Capitals",
+}
 SEUILS_PARIS_PAR_LIGUE = {
     "NHL": {
         "gaa_mauvais": 3.20,
@@ -206,7 +243,10 @@ def _sauvegarder_predictions_du_jour(date_str: str, matches_snapshot: list) -> N
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def obtenir_standings_nhl():
-    data = appeler_avec_retry(_get_json, f"{NHL_API}/standings/now")
+    try:
+        data = appeler_avec_retry(_get_json, f"{NHL_API}/standings/now")
+    except Exception:
+        return pd.DataFrame()
     lignes = []
     for row in data.get("standings") or []:
         abbr = _texte_localise(row.get("teamAbbrev")).upper()
@@ -215,7 +255,7 @@ def obtenir_standings_nhl():
         gp = max(1, int(row.get("gamesPlayed") or 1))
         lignes.append({
             "abbr": abbr,
-            "nom": _texte_localise(row.get("teamName")) or abbr,
+            "nom": _texte_localise(row.get("teamName")) or TEAMS_NHL.get(abbr, abbr),
             "common": _texte_localise(row.get("teamCommonName")) or abbr,
             "conference": row.get("conferenceName") or "",
             "division": row.get("divisionName") or "",
@@ -240,10 +280,22 @@ def obtenir_standings_nhl():
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_teams_nhl_dict():
-    df = obtenir_standings_nhl()
-    if df.empty:
-        return {}
-    return dict(zip(df["abbr"], df["nom"]))
+    """
+    Toujours les 32 équipes (TEAMS_NHL), enrichies par les noms officiels
+    des standings quand l'API répond.
+    """
+    equipes = dict(TEAMS_NHL)
+    try:
+        df = obtenir_standings_nhl()
+    except Exception:
+        df = pd.DataFrame()
+    if df is not None and not df.empty:
+        for _, row in df.iterrows():
+            abbr = str(row.get("abbr") or "").upper()
+            nom = row.get("nom")
+            if abbr and nom:
+                equipes[abbr] = nom
+    return equipes
 
 
 def saison_stats_courante() -> int:
@@ -1099,18 +1151,35 @@ render_page_header(
     league="nhl",
 )
 
-EQUIPES_NHL = get_teams_nhl_dict()
-saison_id = saison_stats_courante()
+try:
+    EQUIPES_NHL = get_teams_nhl_dict()
+except Exception:
+    EQUIPES_NHL = dict(TEAMS_NHL)
+if len(EQUIPES_NHL) < len(TEAMS_NHL):
+    # Filet de sécurité : ne jamais n'afficher qu'une seule franchise
+    merged = dict(TEAMS_NHL)
+    merged.update(EQUIPES_NHL)
+    EQUIPES_NHL = merged
+
+try:
+    saison_id = saison_stats_courante()
+except Exception:
+    saison_id = None
 
 with st.sidebar:
     st.header("⚙️ Paramètres")
     abbrs = sorted(EQUIPES_NHL.keys())
+    if not abbrs:
+        abbrs = sorted(TEAMS_NHL.keys())
+        EQUIPES_NHL = dict(TEAMS_NHL)
+    default_idx = abbrs.index("TOR") if "TOR" in abbrs else 0
     equipe_abbr = st.selectbox(
         "Sélectionnez une équipe:",
         options=abbrs,
-        format_func=lambda a: f"{a} — {EQUIPES_NHL.get(a, a)}",
-        index=abbrs.index("TOR") if "TOR" in abbrs else 0,
+        format_func=lambda a: f"{a} — {EQUIPES_NHL.get(a, TEAMS_NHL.get(a, a))}",
+        index=default_idx,
     )
+    st.caption(f"{len(abbrs)} équipes NHL")
     st.markdown("---")
     st.markdown("**Légende:**")
     st.markdown("""
@@ -1120,7 +1189,8 @@ with st.sidebar:
     - **GAA / SV%** : Moyenne de buts encaissés / % d'arrêts
     - **Écart** : différence de buts projetée (spread)
     """)
-    st.caption(f"Saison stats : {saison_id}")
+    if saison_id:
+        st.caption(f"Saison stats : {saison_id}")
 
 onglets = st.tabs([
     "📊 Résumé",
