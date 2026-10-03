@@ -53,6 +53,7 @@ render_section_title = _ps_theme.render_section_title
 afficher_cartes_matchs = _ps_theme.afficher_cartes_matchs
 afficher_badge_value_bet = _ps_theme.afficher_badge_value_bet
 afficher_tableau_recap_hot_pronostics = _ps_theme.afficher_tableau_recap_hot_pronostics
+afficher_assistant_hot_pronostics = _ps_theme.afficher_assistant_hot_pronostics
 afficher_outil_coherence_totaux = _ps_theme.afficher_outil_coherence_totaux
 render_footer = _ps_theme.render_footer
 render_prediction_match_banner = _ps_theme.render_prediction_match_banner
@@ -1257,6 +1258,11 @@ with onglets[1]:
             st.caption(
                 "⚠️ Heuristiques automatiques (forme récente, GAA/SV% des gardiens titulaires "
                 "estimés, production des top skaters). Pas de garanties de résultat."
+            )
+
+            st.markdown("---")
+            afficher_assistant_hot_pronostics(
+                df_but_all, df_passe_all, df_victoires, lignes_recap, key_prefix="nhl_hot"
             )
 
             st.markdown("---")

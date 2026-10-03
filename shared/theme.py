@@ -10,6 +10,8 @@ Usage dans chaque app (après `st.set_page_config`) :
 from __future__ import annotations
 
 import html
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -474,6 +476,7 @@ def afficher_tableau_recap_hot_pronostics(
     label_primary: str = "💣 HR",
     label_secondary: str = "🏃 Run",
     show_ecart: bool = False,
+    show_runs_equipes: bool = False,
 ) -> None:
     """
     Affiche le tableau de bord Hot Pronostics.
@@ -483,6 +486,7 @@ def afficher_tableau_recap_hot_pronostics(
       confrontation, heure, favori, favori_pct, value_kind, value_label,
       ou_kind, ou_resume, reco_hr, reco_hr_detail, reco_run, reco_run_detail
       (+ option NHL) ecart_kind, ecart_resume
+      (+ option baseball) runs_away, runs_home, runs_away_label, runs_home_label
     """
     if not rows:
         st.info("Aucun match à afficher dans le tableau de bord du jour.")
@@ -500,37 +504,50 @@ def afficher_tableau_recap_hot_pronostics(
         "NO_BET": "⚠️ NO BET",
     }
 
+    def _fmt_runs(v):
+        if v is None:
+            return "—"
+        try:
+            return f"{float(v):.1f}"
+        except (TypeError, ValueError):
+            return "—"
+
+    # Colonnes du bandeau (sans Joueurs) : les reco HR/Run passent sous le bandeau
+    # en pleine largeur pour ne plus allonger verticalement la dernière colonne.
     if show_ecart:
-        widths = [1.0, 1.05, 0.95, 0.95, 1.15]
-        h1, h2, h3, h4, h5 = st.columns(widths)
-        with h1:
-            st.markdown("**Confrontation**")
-        with h2:
-            st.markdown("**Vainqueur & Value**")
-        with h3:
-            st.markdown("**Totaux (O/U)**")
-        with h4:
-            st.markdown("**Écart de points**")
-        with h5:
-            st.markdown(f"**{label_joueurs}**")
+        widths = [1.0, 1.05, 0.95, 0.95]
+        headers = [
+            "Confrontation",
+            "Vainqueur & Value",
+            "Totaux (O/U)",
+            "Écart de points",
+        ]
+    elif show_runs_equipes:
+        widths = [1.0, 1.05, 0.95, 1.0]
+        headers = [
+            "Confrontation",
+            "Vainqueur & Value",
+            "Totaux (O/U)",
+            "Runs / équipe",
+        ]
     else:
-        widths = [1.0, 1.15, 1.05, 1.2]
-        h1, h2, h3, h4 = st.columns(widths)
-        with h1:
-            st.markdown("**Confrontation**")
-        with h2:
-            st.markdown("**Vainqueur & Value**")
-        with h3:
-            st.markdown("**Totaux (O/U)**")
-        with h4:
-            st.markdown(f"**{label_joueurs}**")
+        widths = [1.0, 1.15, 1.05]
+        headers = [
+            "Confrontation",
+            "Vainqueur & Value",
+            "Totaux (O/U)",
+        ]
+
+    header_cols = st.columns(widths)
+    for col, title in zip(header_cols, headers):
+        with col:
+            st.markdown(f"**{title}**")
 
     for row in rows:
         with st.container(border=True):
             cols = st.columns(widths)
             c1, c2, c3 = cols[0], cols[1], cols[2]
-            c_players = cols[-1]
-            c_ecart = cols[3] if show_ecart else None
+            c_extra = cols[3] if (show_ecart or show_runs_equipes) else None
 
             with c1:
                 st.markdown(f"**{row.get('confrontation') or '—'}**")
@@ -555,21 +572,336 @@ def afficher_tableau_recap_hot_pronostics(
                 st.markdown(f"**{ou_labels.get(ou_kind, '⚪ N/A')}**")
                 st.caption(str(row.get("ou_resume") or "Projection indisponible"))
 
-            if c_ecart is not None:
-                with c_ecart:
-                    ecart_kind = row.get("ecart_kind")
-                    st.markdown(f"**{ou_labels.get(ecart_kind, row.get('ecart_label') or '⚪ N/A')}**")
-                    st.caption(str(row.get("ecart_resume") or "Écart indisponible"))
+            if c_extra is not None:
+                with c_extra:
+                    if show_ecart:
+                        ecart_kind = row.get("ecart_kind")
+                        st.markdown(
+                            f"**{ou_labels.get(ecart_kind, row.get('ecart_label') or '⚪ N/A')}**"
+                        )
+                        st.caption(str(row.get("ecart_resume") or "Écart indisponible"))
+                    else:
+                        away_lab = row.get("runs_away_label") or "Ext"
+                        home_lab = row.get("runs_home_label") or "Dom"
+                        st.markdown(
+                            f"**{away_lab} :** {_fmt_runs(row.get('runs_away'))}"
+                        )
+                        st.markdown(
+                            f"**{home_lab} :** {_fmt_runs(row.get('runs_home'))}"
+                        )
+                        st.caption("Moy. runs (10 derniers)")
 
-            with c_players:
-                reco_hr = row.get("reco_hr") or "—"
-                reco_run = row.get("reco_run") or "—"
-                st.markdown(f"**{label_primary} :** {reco_hr}")
-                if row.get("reco_hr_detail"):
-                    st.caption(str(row["reco_hr_detail"]))
-                st.markdown(f"**{label_secondary} :** {reco_run}")
-                if row.get("reco_run_detail"):
-                    st.caption(str(row["reco_run_detail"]))
+            # Bloc joueurs sous les colonnes (pleine largeur)
+            st.markdown(f"**{label_joueurs}**")
+            reco_hr = row.get("reco_hr") or "—"
+            reco_run = row.get("reco_run") or "—"
+            st.markdown(f"**{label_primary} :** {reco_hr}")
+            if row.get("reco_hr_detail"):
+                st.caption(str(row["reco_hr_detail"]))
+            st.markdown(f"**{label_secondary} :** {reco_run}")
+            if row.get("reco_run_detail"):
+                st.caption(str(row["reco_run_detail"]))
+
+
+def _extraire_n_question_hot(question: str, defaut: int = 3) -> int:
+    """Extrait un top-N depuis une question en français (chiffres ou lettres)."""
+    q = (question or "").lower()
+    # Typo fréquente : "rois" pour "trois"
+    q = q.replace("rois joueurs", "trois joueurs").replace("rois ", "trois ")
+    m = re.search(r"\btop\s*(\d{1,2})\b", q)
+    if m:
+        return max(1, min(10, int(m.group(1))))
+    m = re.search(r"\b(\d{1,2})\s*(?:joueurs?|meilleurs?|favoris?|candidats?)\b", q)
+    if m:
+        return max(1, min(10, int(m.group(1))))
+    mots = {
+        "un": 1, "une": 1, "deux": 2, "trois": 3, "quatre": 4, "cinq": 5,
+        "six": 6, "sept": 7, "huit": 8, "neuf": 9, "dix": 10,
+    }
+    for mot, n in mots.items():
+        if re.search(rf"\b{mot}\b", q):
+            return n
+    return defaut
+
+
+def _normaliser_texte_question(texte: str) -> str:
+    brut = unicodedata.normalize("NFKD", texte or "")
+    brut = "".join(c for c in brut if not unicodedata.combining(c))
+    return re.sub(r"\s+", " ", brut.lower()).strip()
+
+
+def _trouver_equipe_dans_question(question_norm: str, equipes) -> str | None:
+    """Nom d'équipe du jour présent dans la question (nom complet ou surnom)."""
+    for nom in sorted(equipes, key=len, reverse=True):
+        nom_n = _normaliser_texte_question(nom)
+        if nom_n and nom_n in question_norm:
+            return nom
+        # « Bruins », « Leafs », « Rangers »… à partir du dernier mot du nom officiel
+        dernier = nom_n.split(" ")[-1] if nom_n else ""
+        if dernier and len(dernier) > 3 and re.search(rf"\b{re.escape(dernier)}\b", question_norm):
+            return nom
+    return None
+
+
+def repondre_question_hot_pronostics(
+    question: str,
+    df_but_all,
+    df_passe_all,
+    df_victoires,
+    lignes_recap: list | None = None,
+) -> str:
+    """
+    Répond à une question libre à partir des tableaux Hot Pronostics NHL déjà calculés.
+    Pas de LLM : intention détectée par mots-clés (buteur / passeur / favoris / O-U).
+    Ne modifie aucun algorithme de prédiction — lecture seule des DataFrames.
+    """
+    q_raw = (question or "").strip()
+    if not q_raw:
+        return (
+            "Écris une question, par exemple : "
+            "« Donne-moi les 3 joueurs les plus susceptibles de marquer un but »."
+        )
+
+    q = _normaliser_texte_question(q_raw)
+    n = _extraire_n_question_hot(q_raw, defaut=3)
+
+    equipes = set()
+    for df in (df_but_all, df_passe_all):
+        if df is not None and hasattr(df, "empty") and not df.empty and "Équipe" in df.columns:
+            equipes.update(str(x) for x in df["Équipe"].dropna().unique())
+    if df_victoires is not None and hasattr(df_victoires, "empty") and not df_victoires.empty:
+        for col in ("Équipe Domicile", "Équipe Extérieur"):
+            if col in df_victoires.columns:
+                equipes.update(str(x) for x in df_victoires[col].dropna().unique())
+    equipe_filtre = _trouver_equipe_dans_question(q, equipes)
+
+    veut_passe = any(k in q for k in (
+        "passe", "passes", "passeur", "passeurs", "assist", "assists",
+        "passe decisive", "passes decisives",
+    ))
+    # « marquer » au hockey = but, sauf si la question parle clairement de passes
+    veut_but = (not veut_passe) and any(k in q for k in (
+        "but", "buts", "buteur", "buteurs", "goal", "goals", "scorer",
+        "marquer", "scoreur",
+    ))
+    # Favoris / win-lose : mots explicites uniquement (évite qu'une question
+    # « qui a le plus de chances de marquer » déclenche aussi les favoris).
+    veut_victoire = any(k in q for k in (
+        "victoire", "vainqueur", "favori", "favoris", "qui gagne", "win/lose",
+        "win lose", "probabilite de victoire", "proba de victoire",
+    ))
+    veut_ou = any(k in q for k in (
+        "over", "under", "o/u", "ou ", "total", "totaux", "ligne",
+    ))
+
+    if not any((veut_but, veut_passe, veut_victoire, veut_ou)):
+        if "joueur" in q or "probab" in q or "susceptible" in q:
+            veut_but = True
+        else:
+            return (
+                "Je n'ai pas bien cerné la question. Tu peux demander par exemple :\n"
+                "- les 3 joueurs les plus susceptibles de **marquer un but**\n"
+                "- les 5 meilleurs candidats **passeurs**\n"
+                "- les **favoris** du jour\n"
+                "- les matchs plutôt **Over** / **Under**"
+            )
+
+    # Question joueur (but/passe) : ne pas ajouter les favoris en plus
+    if (veut_but or veut_passe) and not any(k in q for k in (
+        "favori", "favoris", "vainqueur", "qui gagne", "victoire",
+    )):
+        veut_victoire = False
+
+    # Totaux de match : ne pas lister aussi les buteurs sauf demande explicite
+    if veut_ou and not any(k in q for k in ("joueur", "buteur", "buteurs", "passeur", "passeurs")):
+        if any(k in q for k in ("over", "under", "o/u", "total", "totaux", "ligne")):
+            veut_but = False
+            veut_passe = False
+
+    parties = []
+
+    if veut_but:
+        df = df_but_all
+        if df is None or getattr(df, "empty", True):
+            parties.append("Aucun candidat buteur disponible pour le moment.")
+        else:
+            sous = df
+            if equipe_filtre and "Équipe" in sous.columns:
+                sous = sous[sous["Équipe"].astype(str) == equipe_filtre]
+            sous = sous.head(n)
+            if sous.empty:
+                parties.append(
+                    f"Aucun candidat buteur trouvé pour {equipe_filtre}."
+                    if equipe_filtre else "Aucun candidat buteur."
+                )
+            else:
+                titre = f"**Top {len(sous)} buteurs**"
+                if equipe_filtre:
+                    titre += f" — {equipe_filtre}"
+                lignes = [titre + " (indice Hot Pronostics du jour) :"]
+                for i in range(len(sous)):
+                    row = sous.iloc[i]
+                    try:
+                        indice_txt = f"{float(row.get('Indice But (/100)')):.0f}/100"
+                    except (TypeError, ValueError):
+                        indice_txt = "—"
+                    lignes.append(
+                        f"{i + 1}. **{row.get('Joueur', '?')}** "
+                        f"({row.get('Équipe', '?')} vs {row.get('Adversaire', '?')}) — indice {indice_txt}"
+                    )
+                parties.append("\n".join(lignes))
+
+    if veut_passe:
+        df = df_passe_all
+        if df is None or getattr(df, "empty", True):
+            parties.append("Aucun candidat passeur disponible pour le moment.")
+        else:
+            sous = df
+            if equipe_filtre and "Équipe" in sous.columns:
+                sous = sous[sous["Équipe"].astype(str) == equipe_filtre]
+            sous = sous.head(n)
+            if sous.empty:
+                parties.append(
+                    f"Aucun candidat passeur trouvé pour {equipe_filtre}."
+                    if equipe_filtre else "Aucun candidat passeur."
+                )
+            else:
+                titre = f"**Top {len(sous)} passeurs**"
+                if equipe_filtre:
+                    titre += f" — {equipe_filtre}"
+                lignes = [titre + " (indice Hot Pronostics du jour) :"]
+                for i in range(len(sous)):
+                    row = sous.iloc[i]
+                    try:
+                        indice_txt = f"{float(row.get('Indice Passe (/100)')):.0f}/100"
+                    except (TypeError, ValueError):
+                        indice_txt = "—"
+                    lignes.append(
+                        f"{i + 1}. **{row.get('Joueur', '?')}** "
+                        f"({row.get('Équipe', '?')} vs {row.get('Adversaire', '?')}) — indice {indice_txt}"
+                    )
+                parties.append("\n".join(lignes))
+
+    if veut_victoire:
+        df = df_victoires
+        if df is None or getattr(df, "empty", True):
+            parties.append("Aucune probabilité de victoire disponible.")
+        else:
+            favoris = []
+            for _, row in df.iterrows():
+                home = row.get("Équipe Domicile")
+                away = row.get("Équipe Extérieur")
+                ph = row.get("Proba Domicile (%)")
+                pa = row.get("Proba Extérieur (%)")
+                try:
+                    ph_f, pa_f = float(ph), float(pa)
+                except (TypeError, ValueError):
+                    continue
+                if equipe_filtre and equipe_filtre not in (home, away):
+                    continue
+                if ph_f >= pa_f:
+                    favoris.append((ph_f, home, away, ph_f, "domicile"))
+                else:
+                    favoris.append((pa_f, away, home, pa_f, "extérieur"))
+            favoris.sort(key=lambda x: x[0], reverse=True)
+            favoris = favoris[:n]
+            if not favoris:
+                parties.append("Aucun favori trouvé pour ce filtre.")
+            else:
+                lignes = [f"**Top {len(favoris)} favoris** du jour :"]
+                for i, (pct, fav, adv, _, cote) in enumerate(favoris, 1):
+                    lignes.append(f"{i}. **{fav}** ({pct:.1f}%) vs {adv} — côté {cote}")
+                parties.append("\n".join(lignes))
+
+    if veut_ou and lignes_recap:
+        overs, unders, nobet = [], [], []
+        for row in lignes_recap:
+            kind = (row.get("ou_kind") or "").upper()
+            conf = row.get("confrontation") or "?"
+            resume = row.get("ou_resume") or ""
+            if equipe_filtre:
+                conf_n = _normaliser_texte_question(str(conf))
+                if _normaliser_texte_question(equipe_filtre) not in conf_n:
+                    continue
+            item = f"**{conf}** — {resume}" if resume else f"**{conf}**"
+            if kind == "OVER":
+                overs.append(item)
+            elif kind == "UNDER":
+                unders.append(item)
+            else:
+                nobet.append(item)
+        blocs = ["**Totaux (O/U)** du tableau de bord :"]
+        if overs:
+            blocs.append("🟢 Over :\n- " + "\n- ".join(overs[:n]))
+        if unders:
+            blocs.append("🟢 Under :\n- " + "\n- ".join(unders[:n]))
+        if not overs and not unders:
+            blocs.append("Pas de signal Over/Under clair (NO BET) sur les matchs filtrés.")
+            if nobet:
+                blocs.append("- " + "\n- ".join(nobet[:n]))
+        parties.append("\n\n".join(blocs))
+    elif veut_ou:
+        parties.append("Les totaux O/U ne sont pas chargés pour cette question.")
+
+    parties.append(
+        "\n_Réponse basée uniquement sur les indices Hot Pronostics du jour "
+        "(heuristiques, pas une garantie de résultat)._"
+    )
+    return "\n\n".join(parties)
+
+
+def afficher_assistant_hot_pronostics(
+    df_but_all,
+    df_passe_all,
+    df_victoires,
+    lignes_recap: list | None = None,
+    *,
+    key_prefix: str = "hot",
+) -> None:
+    """
+    Boîte de question dans l'onglet Hot Pronostics NHL.
+    L'utilisateur pose une question en français ; la réponse lit les DataFrames du jour.
+    """
+    st.subheader("💬 Pose une question")
+    st.caption(
+        "Exemples : « Donne-moi les 3 joueurs les plus susceptibles de marquer un but », "
+        "« Qui a le plus de chances d'offrir une passe ? », « Quels sont les favoris du jour ? »."
+    )
+
+    input_key = f"{key_prefix}_input_question"
+    exemples = [
+        "Donne-moi les 3 joueurs les plus susceptibles de marquer un but",
+        "Quels sont les 5 meilleurs candidats pour une passe décisive ?",
+        "Quels sont les favoris du jour ?",
+        "Quels matchs sont plutôt Over ?",
+    ]
+    cols = st.columns(2)
+    for i, ex in enumerate(exemples):
+        with cols[i % 2]:
+            if st.button(ex, key=f"{key_prefix}_ex_{i}", use_container_width=True):
+                st.session_state[input_key] = ex
+                st.session_state[f"{key_prefix}_question"] = ex
+                st.session_state[f"{key_prefix}_auto"] = True
+
+    question = st.text_input(
+        "Ta question",
+        placeholder="Ex. : Donne-moi les 3 joueurs susceptibles de marquer un but…",
+        key=input_key,
+    )
+    envoyer = st.button("Obtenir la réponse", type="primary", key=f"{key_prefix}_btn_send")
+
+    if envoyer and question:
+        st.session_state[f"{key_prefix}_question"] = question
+        st.session_state[f"{key_prefix}_auto"] = True
+
+    q = st.session_state.get(f"{key_prefix}_question") or question
+    if st.session_state.get(f"{key_prefix}_auto") and q:
+        with st.container(border=True):
+            st.markdown(
+                repondre_question_hot_pronostics(
+                    q, df_but_all, df_passe_all, df_victoires, lignes_recap
+                )
+            )
 
 
 def ensure_shared_on_path(app_file: str) -> None:
