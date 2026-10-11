@@ -295,22 +295,29 @@ def _afficher_carte_match_native(row: Mapping[str, Any]) -> None:
             unsafe_allow_html=True,
         )
 
-        # Runs (scoreurs) + Home Runs — même niveau de détail que le tableau
-        runs_val = str(row.get("Total Runs", row.get("Runs", "—")) or "—")
-        hr_val = str(row.get("Home Runs", "—") or "—")
-        st.markdown(
+        # Détail joueurs : NHL (buteurs / passeurs) ou baseball (runs / HR)
+        if "Buteurs" in row or "Passeurs" in row:
+            lignes_meta = [
+                ("Total Buts", str(row.get("Total Buts", "—") or "—")),
+                ("Buteurs", str(row.get("Buteurs", "—") or "—")),
+                ("Passeurs", str(row.get("Passeurs", "—") or "—")),
+            ]
+        else:
+            lignes_meta = [
+                ("Runs", str(row.get("Total Runs", row.get("Runs", "—")) or "—")),
+                ("Home Runs", str(row.get("Home Runs", "—") or "—")),
+            ]
+        items_html = "".join(
             f"""
-            <div class="ps-match-card__meta">
               <div class="ps-match-card__meta-item" style="grid-column: 1 / -1;">
-                <span class="ps-match-card__meta-label">Runs</span>
-                <span class="ps-match-card__meta-value">{_escape(runs_val)}</span>
+                <span class="ps-match-card__meta-label">{_escape(label)}</span>
+                <span class="ps-match-card__meta-value">{_escape(valeur)}</span>
               </div>
-              <div class="ps-match-card__meta-item" style="grid-column: 1 / -1;">
-                <span class="ps-match-card__meta-label">Home Runs</span>
-                <span class="ps-match-card__meta-value">{_escape(hr_val)}</span>
-              </div>
-            </div>
-            """,
+            """
+            for label, valeur in lignes_meta
+        )
+        st.markdown(
+            f'<div class="ps-match-card__meta">{items_html}</div>',
             unsafe_allow_html=True,
         )
 

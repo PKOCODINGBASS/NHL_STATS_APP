@@ -1057,6 +1057,75 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, df_but_all,
 # ---------------------------------------------------------------------------
 # Résumé / match du jour
 # ---------------------------------------------------------------------------
+def _nom_joueur_resume(obj) -> str:
+    """Nom court pour le tableau Résumé : nom de famille, sinon dernier mot de `name`."""
+    if not isinstance(obj, dict):
+        return "?"
+    last = _texte_localise(obj.get("lastName")).strip()
+    if last:
+        return last
+    nom = _texte_localise(obj.get("name")).strip()
+    if " " in nom:
+        return nom.split(" ", 1)[-1]
+    return nom or "?"
+
+
+def _aggreger_buteurs_passeurs(goals) -> tuple:
+    """
+    Agrège les buts d'un match (payload `goals` de /score ou /landing) en
+    deux dicts {abbr: {nom: nb}} : buteurs et passeurs. L'ordre d'apparition
+    est conservé (premier but / première passe en premier).
+    """
+    buteurs, passeurs = {}, {}
+    for goal in goals or []:
+        if not isinstance(goal, dict):
+            continue
+        abbr = _texte_localise(goal.get("teamAbbrev")).upper()
+        if not abbr:
+            continue
+        nom = _nom_joueur_resume(goal)
+        buteurs.setdefault(abbr, {})
+        buteurs[abbr][nom] = buteurs[abbr].get(nom, 0) + 1
+        passeurs.setdefault(abbr, {})
+        for assist in goal.get("assists") or []:
+            if not isinstance(assist, dict):
+                continue
+            nom_a = _nom_joueur_resume(assist)
+            passeurs[abbr][nom_a] = passeurs[abbr].get(nom_a, 0) + 1
+    return buteurs, passeurs
+
+
+def _formater_segment_joueurs_nhl(abbr: str, compteur: dict) -> str:
+    """'TOR: 2 (Matthews, Marner)' ou 'TOR: 0' si aucun."""
+    total = sum(compteur.values()) if compteur else 0
+    if total <= 0:
+        return f"{abbr}: 0"
+    noms = [nom if n <= 1 else f"{nom} x{n}" for nom, n in compteur.items()]
+    return f"{abbr}: {total} ({', '.join(noms)})"
+
+
+def _formater_cellule_joueurs_nhl(away_abbr: str, away_map: dict, home_abbr: str, home_map: dict) -> str:
+    return (
+        f"{_formater_segment_joueurs_nhl(away_abbr, away_map)} | "
+        f"{_formater_segment_joueurs_nhl(home_abbr, home_map)}"
+    )
+
+
+@st.cache_data(show_spinner=False, ttl=120, max_entries=80)
+def _obtenir_goals_landing(game_id: int, cache_bust: int = 0):
+    """Repli si le calendrier /score n'embarque pas encore la liste des buts."""
+    if not game_id:
+        return []
+    try:
+        data = appeler_avec_retry(_get_json, f"{NHL_API}/gamecenter/{int(game_id)}/landing")
+        goals = []
+        for periode in ((data.get("summary") or {}).get("scoring") or []):
+            goals.extend(periode.get("goals") or [])
+        return goals
+    except Exception:
+        return []
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def construire_resume_matchs_du_jour(cache_bust: int = 0):
     games, date_ref, source = obtenir_scores_du_jour()
@@ -1090,8 +1159,19 @@ def construire_resume_matchs_du_jour(cache_bust: int = 0):
             score_str = f"{away_abbr} {as_} - {home_abbr} {hs}"
             total = int(as_) + int(hs)
             ecart_reel = int(hs) - int(as_)
+            goals = g.get("goals")
+            if not goals:
+                goals = _obtenir_goals_landing(g.get("id"), cache_bust)
+            buteurs, passeurs = _aggreger_buteurs_passeurs(goals)
+            buteurs_str = _formater_cellule_joueurs_nhl(
+                away_abbr, buteurs.get(away_abbr, {}), home_abbr, buteurs.get(home_abbr, {})
+            )
+            passeurs_str = _formater_cellule_joueurs_nhl(
+                away_abbr, passeurs.get(away_abbr, {}), home_abbr, passeurs.get(home_abbr, {})
+            )
         else:
             score_str, total, ecart_reel = "—", "—", "—"
+            buteurs_str, passeurs_str = "—", "—"
 
         pred = pred_by_id.get(g.get("id"))
         if pred is not None:
@@ -1112,6 +1192,8 @@ def construire_resume_matchs_du_jour(cache_bust: int = 0):
             "Statut": statut if statut != "À venir" else f"À venir · {heure_paris}",
             "Score": score_str,
             "Total Buts": total,
+            "Buteurs": buteurs_str,
+            "Passeurs": passeurs_str,
             "Écart": ecart_reel,
             "Comparatif Prédiction": comparatif,
             "Résultat vs Algo": resultat,
@@ -1189,7 +1271,7 @@ onglets = st.tabs([
 # ---- Résumé ----
 with onglets[0]:
     if onglets[0].open:
-        render_section_title("Résumé du jour", "Scores NHL et comparatif aux prédictions")
+        render_section_title("Résumé du jour", "Scores, buteurs, passeurs et comparatif aux prédictions")
         if "resume_cache_bust" not in st.session_state:
             st.session_state.resume_cache_bust = 0
         if st.button("🔄 Rafraîchir les scores"):
@@ -1215,10 +1297,16 @@ with onglets[0]:
                     "Statut": st.column_config.TextColumn("Statut", width="medium"),
                     "Score": st.column_config.TextColumn("Score", width="small"),
                     "Total Buts": st.column_config.TextColumn("Total Buts", width="small"),
+                    "Buteurs": st.column_config.TextColumn("Buteurs", width="large"),
+                    "Passeurs": st.column_config.TextColumn("Passeurs", width="large"),
                     "Écart": st.column_config.TextColumn("Écart", width="small"),
                     "Comparatif Prédiction": st.column_config.TextColumn("Comparatif Prédiction", width="medium"),
                     "Résultat vs Algo": st.column_config.TextColumn("Résultat vs Algo", width="small"),
                 },
+            )
+            st.caption(
+                "Buteurs / Passeurs : joueurs qui ont marqué ou offert une passe "
+                "(affichés une fois le match commencé)."
             )
 
 # ---- Hot Pronostics ----
