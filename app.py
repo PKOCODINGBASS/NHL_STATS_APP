@@ -535,56 +535,105 @@ def _stats_skater_depuis_feuille(club_row: dict | None, joueur_ligne: dict) -> d
     }
 
 
-@st.cache_data(show_spinner=False, ttl=300, max_entries=80)
-def obtenir_composition_match(game_id: int) -> dict:
+def _id_joueur_int(valeur):
+    try:
+        return int(valeur)
+    except (TypeError, ValueError):
+        return None
+
+
+def _skater_depuis_feuille_api(obj: dict) -> dict | None:
+    """Normalise un joueur issu du boxscore ou des rosterSpots (skaters uniquement)."""
+    poste = (obj.get("positionCode") or obj.get("position") or "").upper()
+    if poste in ("G", "GOALIE"):
+        return None
+    pid = _id_joueur_int(obj.get("playerId") or obj.get("id"))
+    if not pid:
+        return None
+    nom = (
+        f"{_texte_localise(obj.get('firstName'))} {_texte_localise(obj.get('lastName'))}"
+    ).strip() or _texte_localise(obj.get("name"))
+    return {"id": pid, "nom": nom or "?", "poste": poste}
+
+
+def _ids_scratches_match(game_id: int) -> set:
+    """IDs officiellement scratch (right-rail). Ex. Victor Olofsson à VGK."""
+    ids = set()
+    try:
+        rail = appeler_avec_retry(
+            _get_json, f"{NHL_API}/gamecenter/{int(game_id)}/right-rail"
+        )
+    except Exception:
+        return ids
+    gi = (rail or {}).get("gameInfo") or {}
+    for camp in ("awayTeam", "homeTeam"):
+        for x in (gi.get(camp) or {}).get("scratches") or []:
+            sid = _id_joueur_int(x.get("id") or x.get("playerId"))
+            if sid:
+                ids.add(sid)
+    return ids
+
+
+@st.cache_data(show_spinner=False, ttl=180, max_entries=80)
+def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
     """
-    Feuille de match officielle NHL (`rosterSpots` du play-by-play).
-    Les scratches n'y figurent pas. Vide tant que la composition n'est pas
-    publiée (match encore en FUT). Retourne uniquement les skaters (pas les
-    gardiens) : {'home': [...], 'away': [...], 'annoncee': bool}.
+    Feuille de match : skaters réellement habillés.
+    1) boxscore `playerByGameStats` dès que le match a commencé (source la plus sûre)
+    2) sinon `rosterSpots` du play-by-play (composition PRE)
+    3) on retire toujours les scratches du right-rail
+    Vide tant que rien n'est publié (FUT). `_cache_version` invalide l'ancien cache.
     """
     vide = {"home": [], "away": [], "annoncee": False}
     if not game_id:
         return vide
+
+    scratches = _ids_scratches_match(game_id)
+    home, away = [], []
+
     try:
-        data = appeler_avec_retry(
-            _get_json, f"{NHL_API}/gamecenter/{int(game_id)}/play-by-play"
+        box = appeler_avec_retry(
+            _get_json, f"{NHL_API}/gamecenter/{int(game_id)}/boxscore"
         )
+        pbg = (box or {}).get("playerByGameStats") or {}
+        if pbg.get("homeTeam") or pbg.get("awayTeam"):
+            for camp, cible in (("homeTeam", "home"), ("awayTeam", "away")):
+                t = pbg.get(camp) or {}
+                liste = []
+                for groupe in ("forwards", "defense"):
+                    for pl in t.get(groupe) or []:
+                        item = _skater_depuis_feuille_api(pl)
+                        if item:
+                            liste.append(item)
+                if cible == "home":
+                    home = liste
+                else:
+                    away = liste
     except Exception:
-        return vide
-    spots = data.get("rosterSpots") or []
-    if not spots:
-        return vide
-    home_id = (data.get("homeTeam") or {}).get("id")
-    away_id = (data.get("awayTeam") or {}).get("id")
+        pass
 
-    def _skaters_camp(team_id) -> list:
-        out = []
+    if not home and not away:
+        try:
+            data = appeler_avec_retry(
+                _get_json, f"{NHL_API}/gamecenter/{int(game_id)}/play-by-play"
+            )
+        except Exception:
+            return vide
+        spots = data.get("rosterSpots") or []
+        if not spots:
+            return vide
+        home_id = (data.get("homeTeam") or {}).get("id")
+        away_id = (data.get("awayTeam") or {}).get("id")
         for sp in spots:
-            if sp.get("teamId") != team_id:
+            item = _skater_depuis_feuille_api(sp)
+            if not item:
                 continue
-            poste = (sp.get("positionCode") or "").upper()
-            if poste in ("G", "GOALIE"):
-                continue
-            pid = sp.get("playerId")
-            if not pid:
-                continue
-            try:
-                pid = int(pid)
-            except (TypeError, ValueError):
-                continue
-            out.append({
-                "id": pid,
-                "nom": (
-                    f"{_texte_localise(sp.get('firstName'))} "
-                    f"{_texte_localise(sp.get('lastName'))}"
-                ).strip(),
-                "poste": poste,
-            })
-        return out
+            if sp.get("teamId") == home_id:
+                home.append(item)
+            elif sp.get("teamId") == away_id:
+                away.append(item)
 
-    home = _skaters_camp(home_id)
-    away = _skaters_camp(away_id)
+    home = [j for j in home if j["id"] not in scratches]
+    away = [j for j in away if j["id"] not in scratches]
     return {"home": home, "away": away, "annoncee": bool(home or away)}
 
 
@@ -1029,8 +1078,8 @@ def _projeter_buts_equipes(abbr_home, abbr_away):
 # ---------------------------------------------------------------------------
 # Hot Pronostics global
 # ---------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=300)
-def construire_donnees_hot_pronostics_nhl():
+@st.cache_data(show_spinner=False, ttl=180)
+def construire_donnees_hot_pronostics_nhl(_cache_version: int = 2):
     games, date_ref, source = obtenir_scores_du_jour()
     if not games:
         return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), date_ref, source
