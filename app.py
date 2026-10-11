@@ -486,6 +486,108 @@ def top_skaters_equipe(abbr: str, top_n: int = 12, avec_gamelog: bool = True) ->
     return out
 
 
+def _index_skaters_club(abbr: str) -> dict:
+    """Index {playerId: ligne club-stats} pour croiser avec la feuille de match."""
+    out = {}
+    for s in (obtenir_club_stats(abbr).get("skaters") or []):
+        pid = s.get("playerId")
+        if pid is None:
+            continue
+        try:
+            out[int(pid)] = s
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _stats_skater_depuis_feuille(club_row: dict | None, joueur_ligne: dict) -> dict:
+    """
+    Stats utilisées pour classer un joueur ANNONCÉ sur la composition.
+    Si le joueur n'a pas encore de ligne club-stats (rappel / débutant), on
+    le garde quand même avec des zéros — il est sur la feuille.
+    """
+    if club_row:
+        gp = max(1, int(club_row.get("gamesPlayed") or 1))
+        goals_s = int(club_row.get("goals") or 0)
+        assists_s = int(club_row.get("assists") or 0)
+        points_s = int(club_row.get("points") or 0)
+        nom = _nom_skater(club_row) or joueur_ligne.get("nom") or "?"
+        poste = club_row.get("positionCode") or joueur_ligne.get("poste") or ""
+        gp_saison = int(club_row.get("gamesPlayed") or 0)
+    else:
+        gp = 1
+        goals_s = assists_s = points_s = 0
+        nom = joueur_ligne.get("nom") or "?"
+        poste = joueur_ligne.get("poste") or ""
+        gp_saison = 0
+    return {
+        "id": joueur_ligne.get("id"),
+        "nom": nom,
+        "poste": poste,
+        "goals_saison": goals_s,
+        "assists_saison": assists_s,
+        "points_saison": points_s,
+        "gp_saison": gp_saison,
+        "goals_10": round(goals_s / gp * 10, 1),
+        "assists_10": round(assists_s / gp * 10, 1),
+        "points_10": round(points_s / gp * 10, 1),
+        "gp_10": 10,
+    }
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=80)
+def obtenir_composition_match(game_id: int) -> dict:
+    """
+    Feuille de match officielle NHL (`rosterSpots` du play-by-play).
+    Les scratches n'y figurent pas. Vide tant que la composition n'est pas
+    publiée (match encore en FUT). Retourne uniquement les skaters (pas les
+    gardiens) : {'home': [...], 'away': [...], 'annoncee': bool}.
+    """
+    vide = {"home": [], "away": [], "annoncee": False}
+    if not game_id:
+        return vide
+    try:
+        data = appeler_avec_retry(
+            _get_json, f"{NHL_API}/gamecenter/{int(game_id)}/play-by-play"
+        )
+    except Exception:
+        return vide
+    spots = data.get("rosterSpots") or []
+    if not spots:
+        return vide
+    home_id = (data.get("homeTeam") or {}).get("id")
+    away_id = (data.get("awayTeam") or {}).get("id")
+
+    def _skaters_camp(team_id) -> list:
+        out = []
+        for sp in spots:
+            if sp.get("teamId") != team_id:
+                continue
+            poste = (sp.get("positionCode") or "").upper()
+            if poste in ("G", "GOALIE"):
+                continue
+            pid = sp.get("playerId")
+            if not pid:
+                continue
+            try:
+                pid = int(pid)
+            except (TypeError, ValueError):
+                continue
+            out.append({
+                "id": pid,
+                "nom": (
+                    f"{_texte_localise(sp.get('firstName'))} "
+                    f"{_texte_localise(sp.get('lastName'))}"
+                ).strip(),
+                "poste": poste,
+            })
+        return out
+
+    home = _skaters_camp(home_id)
+    away = _skaters_camp(away_id)
+    return {"home": home, "away": away, "annoncee": bool(home or away)}
+
+
 # ---------------------------------------------------------------------------
 # Modèles heuristiques (structure identique baseball, métriques hockey)
 # ---------------------------------------------------------------------------
@@ -927,7 +1029,7 @@ def _projeter_buts_equipes(abbr_home, abbr_away):
 # ---------------------------------------------------------------------------
 # Hot Pronostics global
 # ---------------------------------------------------------------------------
-@st.cache_data(show_spinner=False, ttl=1800)
+@st.cache_data(show_spinner=False, ttl=300)
 def construire_donnees_hot_pronostics_nhl():
     games, date_ref, source = obtenir_scores_du_jour()
     if not games:
@@ -972,6 +1074,7 @@ def construire_donnees_hot_pronostics_nhl():
             "Buts proj. extérieur": None if buts_away is None else round(buts_away, 2),
         })
 
+        comp = obtenir_composition_match(g.get("id"))
         matchs.append({
             "game_id": g.get("id"),
             "home_abbr": home_abbr,
@@ -983,14 +1086,25 @@ def construire_donnees_hot_pronostics_nhl():
             "statut": _statut_match(g.get("gameState")),
             "buts_home_proj": None if buts_home is None else round(buts_home, 2),
             "buts_away_proj": None if buts_away is None else round(buts_away, 2),
+            "lineup_annoncee": bool(comp.get("annoncee")),
         })
 
-        for camp_abbr, camp_name, adv_name, gard_adv in (
-            (home_abbr, home_name, away_name, gard_a),
-            (away_abbr, away_name, home_name, gard_h),
+        # Uniquement les skaters inscrits sur la feuille officielle.
+        # Tant que la composition n'est pas publiée, aucune proposition joueur.
+        if not comp.get("annoncee"):
+            continue
+
+        for camp_abbr, camp_name, adv_name, gard_adv, camp_cle in (
+            (home_abbr, home_name, away_name, gard_a, "home"),
+            (away_abbr, away_name, home_name, gard_h, "away"),
         ):
-            for s in top_skaters_equipe(camp_abbr, top_n=8, avec_gamelog=False):
-                gp_s = max(1, s["gp_saison"])
+            feuille = comp.get(camp_cle) or []
+            if not feuille:
+                continue
+            stats_club = _index_skaters_club(camp_abbr)
+            for j in feuille:
+                s = _stats_skater_depuis_feuille(stats_club.get(j["id"]), j)
+                gp_s = max(1, s["gp_saison"] or 1)
                 candidats_but.append({
                     "Joueur": s["nom"],
                     "Équipe": camp_name,
@@ -1380,15 +1494,20 @@ with onglets[1]:
                 label_secondary="🎯 Passeurs",
                 show_ecart=True,
             )
+            nb_lineups = sum(1 for m in matchs_jour if m.get("lineup_annoncee"))
             st.caption(
-                "Buteurs / Passeurs : 3 propositions par match, classées par indice de "
-                "confiance (/100). Totaux (O/U) : somme des buts projetés des 2 équipes "
-                "vs ligne saison. Écart de points : différence domicile − extérieur "
-                "(spread suggéré au demi-but)."
+                "Buteurs / Passeurs : uniquement les joueurs annoncés sur la feuille "
+                "de match, top 3 classé par indice de confiance (/100). "
+                f"Composition officielle publiée pour {nb_lineups} match(s) sur "
+                f"{len(matchs_jour)} (souvent 1 à 3h avant le coup d'envoi)."
+            )
+            st.caption(
+                "Totaux (O/U) : somme des buts projetés des 2 équipes vs ligne saison. "
+                "Écart de points : différence domicile − extérieur (spread suggéré au demi-but)."
             )
             st.caption(
                 "⚠️ Heuristiques automatiques (forme récente, GAA/SV% des gardiens titulaires "
-                "estimés, production des top skaters). Pas de garanties de résultat."
+                "estimés, production des skaters de la composition). Pas de garanties de résultat."
             )
 
             st.markdown("---")
@@ -1399,7 +1518,11 @@ with onglets[1]:
             st.markdown("---")
             st.subheader("🏒 Top 5 Buteurs probables")
             if df_top5_but.empty:
-                st.info("Pas assez de données skaters pour classer les buteurs.")
+                st.info(
+                    "Aucune composition officielle n'est encore publiée, ou pas assez "
+                    "de skaters inscrits pour classer les buteurs. Réessayez plus près "
+                    "de l'heure des matchs."
+                )
             else:
                 st.dataframe(
                     df_top5_but[[
@@ -1422,7 +1545,11 @@ with onglets[1]:
 
             st.subheader("🎯 Top 5 Passeurs probables")
             if df_top5_passe.empty:
-                st.info("Pas assez de données skaters pour classer les passeurs.")
+                st.info(
+                    "Aucune composition officielle n'est encore publiée, ou pas assez "
+                    "de skaters inscrits pour classer les passeurs. Réessayez plus près "
+                    "de l'heure des matchs."
+                )
             else:
                 st.dataframe(
                     df_top5_passe[[
@@ -1612,8 +1739,15 @@ with onglets[3]:
         prediction_buts = predire_buts_match(
             forme_nous.get("gf"), forme_nous.get("ga"), gard_adv
         )
-        skaters = top_skaters_equipe(equipe_abbr, top_n=12)
-        joueurs = predire_joueurs_du_jour(skaters, gard_adv, top_n=3)
+        comp_pred = obtenir_composition_match(match.get("game_id"))
+        camp_feuille = "home" if match["est_domicile"] else "away"
+        feuille = (comp_pred or {}).get(camp_feuille) or []
+        if feuille:
+            stats_club = _index_skaters_club(equipe_abbr)
+            skaters = [_stats_skater_depuis_feuille(stats_club.get(j["id"]), j) for j in feuille]
+            joueurs = predire_joueurs_du_jour(skaters, gard_adv, top_n=3)
+        else:
+            skaters, joueurs = [], []
 
         conseils = generer_recommandation_pari(
             pct_nous, pct_adverse, gard_nous, gard_adv, prediction_buts, joueurs, ligue="NHL",
@@ -1694,9 +1828,15 @@ with onglets[3]:
                 st.caption("Projection match indisponible.")
 
         st.subheader("⭐ Joueurs à surveiller")
-        if not joueurs:
-            st.info("Pas assez de données joueurs.")
+        if not feuille:
+            st.info(
+                "Composition pas encore publiée pour ce match : aucune proposition joueur. "
+                "Seuls les skaters inscrits sur la feuille officielle sont retenus."
+            )
+        elif not joueurs:
+            st.info("Pas assez de données joueurs parmi la composition annoncée.")
         else:
+            st.caption("Uniquement les joueurs annoncés sur la feuille de match.")
             st.dataframe(pd.DataFrame(joueurs), hide_index=True)
 
 render_footer("NHL", datetime.now(TZ_PARIS).strftime("%d/%m/%Y %H:%M"))
