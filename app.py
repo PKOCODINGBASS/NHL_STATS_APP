@@ -850,22 +850,59 @@ def _classer_passeurs(candidats: list) -> pd.DataFrame:
     return df.sort_values("Indice Passe (/100)", ascending=False).reset_index(drop=True)
 
 
-def _meilleure_reco_joueur_match(df_all, home, away, indice_col):
+def _top_recos_joueurs_match(df_all, home, away, indice_col, n: int = 3) -> list:
+    """
+    Top `n` joueurs déjà classés pour UNE confrontation (sans recalcul).
+    Retourne [{'joueur', 'equipe', 'indice'}, ...] triés par indice décroissant.
+    """
     if df_all is None or getattr(df_all, "empty", True):
-        return None
+        return []
     masque = (
         ((df_all["Équipe"] == home) & (df_all["Adversaire"] == away))
         | ((df_all["Équipe"] == away) & (df_all["Adversaire"] == home))
     )
-    sous = df_all[masque]
-    if sous.empty:
-        return None
-    best = sous.iloc[0]
-    return {
-        "joueur": best.get("Joueur"),
-        "equipe": best.get("Équipe"),
-        "indice": best.get(indice_col),
-    }
+    sous = df_all.loc[masque].head(max(1, int(n)))
+    recos = []
+    for _, row in sous.iterrows():
+        joueur = row.get("Joueur")
+        if not joueur:
+            continue
+        indice = row.get(indice_col)
+        if indice is not None and pd.isna(indice):
+            indice = None
+        elif indice is not None:
+            indice = float(indice)
+        recos.append({
+            "joueur": joueur,
+            "equipe": row.get("Équipe"),
+            "indice": indice,
+        })
+    return recos
+
+
+def _formater_recos_joueurs_hot(recos: list):
+    """Formate les top recos : (texte joueurs, détail indices) — repli compact."""
+    if not recos:
+        return None, None
+    noms, indices = [], []
+    for r in recos:
+        joueur = r.get("joueur")
+        if not joueur:
+            continue
+        equipe = r.get("equipe") or "?"
+        noms.append(f"{joueur} ({equipe})")
+        indice = r.get("indice")
+        if indice is not None and not pd.isna(indice):
+            indices.append(f"{float(indice):.0f}")
+    if not noms:
+        return None, None
+    detail = f"Confiance {' · '.join(indices)}/100" if indices else None
+    return " · ".join(noms), detail
+
+
+def _meilleure_reco_joueur_match(df_all, home, away, indice_col):
+    recos = _top_recos_joueurs_match(df_all, home, away, indice_col, n=1)
+    return recos[0] if recos else None
 
 
 def _projeter_buts_equipes(abbr_home, abbr_away):
@@ -1031,8 +1068,10 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, df_but_all,
         ecart = _ecart_points_predit(m.get("buts_home_proj"), m.get("buts_away_proj"))
         info_ecart = formater_ecart_points(ecart, home, away, pct_home, pct_away) or {}
 
-        reco_but = _meilleure_reco_joueur_match(df_but_all, home, away, "Indice But (/100)")
-        reco_passe = _meilleure_reco_joueur_match(df_passe_all, home, away, "Indice Passe (/100)")
+        recos_but = _top_recos_joueurs_match(df_but_all, home, away, "Indice But (/100)", n=3)
+        recos_passe = _top_recos_joueurs_match(df_passe_all, home, away, "Indice Passe (/100)", n=3)
+        reco_but_txt, reco_but_detail = _formater_recos_joueurs_hot(recos_but)
+        reco_passe_txt, reco_passe_detail = _formater_recos_joueurs_hot(recos_passe)
 
         lignes.append({
             "confrontation": f"{away} vs {home}",
@@ -1046,10 +1085,12 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, df_but_all,
             "ecart_kind": info_ecart.get("ecart_kind"),
             "ecart_label": info_ecart.get("ecart_label"),
             "ecart_resume": info_ecart.get("ecart_resume"),
-            "reco_hr": f"{reco_but['joueur']} ({reco_but['equipe']})" if reco_but and reco_but.get("joueur") else None,
-            "reco_hr_detail": f"Indice {reco_but['indice']:.0f}/100" if reco_but and reco_but.get("indice") is not None else None,
-            "reco_run": f"{reco_passe['joueur']} ({reco_passe['equipe']})" if reco_passe and reco_passe.get("joueur") else None,
-            "reco_run_detail": f"Indice {reco_passe['indice']:.0f}/100" if reco_passe and reco_passe.get("indice") is not None else None,
+            "reco_hr": reco_but_txt,
+            "reco_hr_detail": reco_but_detail,
+            "reco_hr_list": recos_but,
+            "reco_run": reco_passe_txt,
+            "reco_run_detail": reco_passe_detail,
+            "reco_run_list": recos_passe,
         })
     return lignes
 
@@ -1334,14 +1375,16 @@ with onglets[1]:
             st.subheader("📋 Tableau de bord du jour")
             afficher_tableau_recap_hot_pronostics(
                 lignes_recap,
-                label_joueurs="Joueurs (Buteur / Passeur)",
-                label_primary="🏒 Buteur",
-                label_secondary="🎯 Passeur",
+                label_joueurs="Propositions du match (top 3)",
+                label_primary="🏒 Buteurs",
+                label_secondary="🎯 Passeurs",
                 show_ecart=True,
             )
             st.caption(
-                "Totaux (O/U) : somme des buts projetés des 2 équipes vs ligne saison. "
-                "Écart de points : différence domicile − extérieur (spread suggéré au demi-but)."
+                "Buteurs / Passeurs : 3 propositions par match, classées par indice de "
+                "confiance (/100). Totaux (O/U) : somme des buts projetés des 2 équipes "
+                "vs ligne saison. Écart de points : différence domicile − extérieur "
+                "(spread suggéré au demi-but)."
             )
             st.caption(
                 "⚠️ Heuristiques automatiques (forme récente, GAA/SV% des gardiens titulaires "

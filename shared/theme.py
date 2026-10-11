@@ -476,6 +476,27 @@ def afficher_outil_coherence_totaux(
         )
 
 
+def _afficher_liste_recos_hot(label: str, recos, texte_repli, detail_repli) -> None:
+    """Liste numérotée de propositions + indice de confiance, ou repli compact."""
+    st.markdown(f"**{label}**")
+    if recos:
+        for i, r in enumerate(recos, 1):
+            if not isinstance(r, dict):
+                continue
+            joueur = r.get("joueur") or "?"
+            equipe = r.get("equipe") or "?"
+            indice = r.get("indice")
+            try:
+                confiance = f"{float(indice):.0f}/100"
+            except (TypeError, ValueError):
+                confiance = "—"
+            st.markdown(f"{i}. **{joueur}** ({equipe}) · confiance **{confiance}**")
+        return
+    st.markdown(texte_repli or "—")
+    if detail_repli:
+        st.caption(str(detail_repli))
+
+
 def afficher_tableau_recap_hot_pronostics(
     rows: list,
     *,
@@ -492,6 +513,7 @@ def afficher_tableau_recap_hot_pronostics(
     `rows` = liste de dicts déjà agrégés (aucune requête ici) :
       confrontation, heure, favori, favori_pct, value_kind, value_label,
       ou_kind, ou_resume, reco_hr, reco_hr_detail, reco_run, reco_run_detail
+      (+ option listes) reco_hr_list, reco_run_list
       (+ option NHL) ecart_kind, ecart_resume
       (+ option baseball) runs_away, runs_home, runs_away_label, runs_home_label
     """
@@ -600,14 +622,21 @@ def afficher_tableau_recap_hot_pronostics(
 
             # Bloc joueurs sous les colonnes (pleine largeur)
             st.markdown(f"**{label_joueurs}**")
-            reco_hr = row.get("reco_hr") or "—"
-            reco_run = row.get("reco_run") or "—"
-            st.markdown(f"**{label_primary} :** {reco_hr}")
-            if row.get("reco_hr_detail"):
-                st.caption(str(row["reco_hr_detail"]))
-            st.markdown(f"**{label_secondary} :** {reco_run}")
-            if row.get("reco_run_detail"):
-                st.caption(str(row["reco_run_detail"]))
+            col_pri, col_sec = st.columns(2)
+            with col_pri:
+                _afficher_liste_recos_hot(
+                    label_primary,
+                    row.get("reco_hr_list"),
+                    row.get("reco_hr") or "—",
+                    row.get("reco_hr_detail"),
+                )
+            with col_sec:
+                _afficher_liste_recos_hot(
+                    label_secondary,
+                    row.get("reco_run_list"),
+                    row.get("reco_run") or "—",
+                    row.get("reco_run_detail"),
+                )
 
 
 def _extraire_n_question_hot(question: str, defaut: int = 3) -> int:
