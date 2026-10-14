@@ -503,6 +503,7 @@ def afficher_tableau_recap_hot_pronostics(
     label_joueurs: str = "Joueurs (HR / Run)",
     label_primary: str = "💣 HR",
     label_secondary: str = "🏃 Run",
+    label_tertiary: str | None = None,
     show_ecart: bool = False,
     show_runs_equipes: bool = False,
 ) -> None:
@@ -513,8 +514,8 @@ def afficher_tableau_recap_hot_pronostics(
     `rows` = liste de dicts déjà agrégés (aucune requête ici) :
       confrontation, heure, favori, favori_pct, value_kind, value_label,
       ou_kind, ou_resume, reco_hr, reco_hr_detail, reco_run, reco_run_detail
-      (+ option listes) reco_hr_list, reco_run_list
-      (+ option NHL) ecart_kind, ecart_resume
+      (+ option listes) reco_hr_list, reco_run_list, reco_point_list
+      (+ option NHL) ecart_kind, ecart_resume, label_tertiary (1 point ou +)
       (+ option baseball) runs_away, runs_home, runs_away_label, runs_home_label
     """
     if not rows:
@@ -622,21 +623,30 @@ def afficher_tableau_recap_hot_pronostics(
 
             # Bloc joueurs sous les colonnes (pleine largeur)
             st.markdown(f"**{label_joueurs}**")
-            col_pri, col_sec = st.columns(2)
-            with col_pri:
+            n_joueur = 3 if label_tertiary else 2
+            cols_j = st.columns(n_joueur)
+            with cols_j[0]:
                 _afficher_liste_recos_hot(
                     label_primary,
                     row.get("reco_hr_list"),
                     row.get("reco_hr") or "—",
                     row.get("reco_hr_detail"),
                 )
-            with col_sec:
+            with cols_j[1]:
                 _afficher_liste_recos_hot(
                     label_secondary,
                     row.get("reco_run_list"),
                     row.get("reco_run") or "—",
                     row.get("reco_run_detail"),
                 )
+            if n_joueur == 3:
+                with cols_j[2]:
+                    _afficher_liste_recos_hot(
+                        label_tertiary,
+                        row.get("reco_point_list"),
+                        row.get("reco_point") or "—",
+                        row.get("reco_point_detail"),
+                    )
 
 
 def _extraire_n_question_hot(question: str, defaut: int = 3) -> int:
@@ -685,10 +695,11 @@ def repondre_question_hot_pronostics(
     df_passe_all,
     df_victoires,
     lignes_recap: list | None = None,
+    df_point_all=None,
 ) -> str:
     """
     Répond à une question libre à partir des tableaux Hot Pronostics NHL déjà calculés.
-    Pas de LLM : intention détectée par mots-clés (buteur / passeur / favoris / O-U).
+    Pas de LLM : intention détectée par mots-clés (buteur / passeur / point / favoris / O-U).
     Ne modifie aucun algorithme de prédiction — lecture seule des DataFrames.
     """
     q_raw = (question or "").strip()
@@ -702,7 +713,7 @@ def repondre_question_hot_pronostics(
     n = _extraire_n_question_hot(q_raw, defaut=3)
 
     equipes = set()
-    for df in (df_but_all, df_passe_all):
+    for df in (df_but_all, df_passe_all, df_point_all):
         if df is not None and hasattr(df, "empty") and not df.empty and "Équipe" in df.columns:
             equipes.update(str(x) for x in df["Équipe"].dropna().unique())
     if df_victoires is not None and hasattr(df_victoires, "empty") and not df_victoires.empty:
@@ -715,8 +726,21 @@ def repondre_question_hot_pronostics(
         "passe", "passes", "passeur", "passeurs", "assist", "assists",
         "passe decisive", "passes decisives",
     ))
-    # « marquer » au hockey = but, sauf si la question parle clairement de passes
-    veut_but = (not veut_passe) and any(k in q for k in (
+    # « 1 point ou + » (but ou passe). On ignore « écart de points » (spread).
+    veut_point = ("ecart" not in q) and (
+        any(k in q for k in (
+            "un point", "1 point", "au moins un point", "point ou plus",
+            "pointeur", "pointeurs", "des points",
+        ))
+        or (
+            ("point" in q or "points" in q)
+            and not veut_passe
+            and "but" not in q
+            and "goal" not in q
+        )
+    )
+    # « marquer » au hockey = but, sauf si la question parle de passes ou de points
+    veut_but = (not veut_passe) and (not veut_point) and any(k in q for k in (
         "but", "buts", "buteur", "buteurs", "goal", "goals", "scorer",
         "marquer", "scoreur",
     ))
@@ -730,7 +754,7 @@ def repondre_question_hot_pronostics(
         "over", "under", "o/u", "ou ", "total", "totaux", "ligne",
     ))
 
-    if not any((veut_but, veut_passe, veut_victoire, veut_ou)):
+    if not any((veut_but, veut_passe, veut_point, veut_victoire, veut_ou)):
         if "joueur" in q or "probab" in q or "susceptible" in q:
             veut_but = True
         else:
@@ -738,21 +762,26 @@ def repondre_question_hot_pronostics(
                 "Je n'ai pas bien cerné la question. Tu peux demander par exemple :\n"
                 "- les 3 joueurs les plus susceptibles de **marquer un but**\n"
                 "- les 5 meilleurs candidats **passeurs**\n"
+                "- les joueurs susceptibles de **marquer un point** (but ou passe)\n"
                 "- les **favoris** du jour\n"
                 "- les matchs plutôt **Over** / **Under**"
             )
 
-    # Question joueur (but/passe) : ne pas ajouter les favoris en plus
-    if (veut_but or veut_passe) and not any(k in q for k in (
+    # Question joueur (but/passe/point) : ne pas ajouter les favoris en plus
+    if (veut_but or veut_passe or veut_point) and not any(k in q for k in (
         "favori", "favoris", "vainqueur", "qui gagne", "victoire",
     )):
         veut_victoire = False
 
-    # Totaux de match : ne pas lister aussi les buteurs sauf demande explicite
-    if veut_ou and not any(k in q for k in ("joueur", "buteur", "buteurs", "passeur", "passeurs")):
+    # Totaux de match : ne pas lister aussi les joueurs sauf demande explicite
+    if veut_ou and not any(k in q for k in (
+        "joueur", "buteur", "buteurs", "passeur", "passeurs",
+        "pointeur", "pointeurs", "un point", "1 point",
+    )):
         if any(k in q for k in ("over", "under", "o/u", "total", "totaux", "ligne")):
             veut_but = False
             veut_passe = False
+            veut_point = False
 
     parties = []
 
@@ -810,6 +839,37 @@ def repondre_question_hot_pronostics(
                     row = sous.iloc[i]
                     try:
                         indice_txt = f"{float(row.get('Indice Passe (/100)')):.0f}/100"
+                    except (TypeError, ValueError):
+                        indice_txt = "—"
+                    lignes.append(
+                        f"{i + 1}. **{row.get('Joueur', '?')}** "
+                        f"({row.get('Équipe', '?')} vs {row.get('Adversaire', '?')}) — indice {indice_txt}"
+                    )
+                parties.append("\n".join(lignes))
+
+    if veut_point:
+        df = df_point_all
+        if df is None or getattr(df, "empty", True):
+            parties.append("Aucun candidat 1 point ou + disponible pour le moment.")
+        else:
+            sous = df
+            if equipe_filtre and "Équipe" in sous.columns:
+                sous = sous[sous["Équipe"].astype(str) == equipe_filtre]
+            sous = sous.head(n)
+            if sous.empty:
+                parties.append(
+                    f"Aucun candidat 1 point ou + trouvé pour {equipe_filtre}."
+                    if equipe_filtre else "Aucun candidat 1 point ou +."
+                )
+            else:
+                titre = f"**Top {len(sous)} — 1 point ou plus**"
+                if equipe_filtre:
+                    titre += f" — {equipe_filtre}"
+                lignes = [titre + " (indice Hot Pronostics du jour) :"]
+                for i in range(len(sous)):
+                    row = sous.iloc[i]
+                    try:
+                        indice_txt = f"{float(row.get('Indice Point (/100)')):.0f}/100"
                     except (TypeError, ValueError):
                         indice_txt = "—"
                     lignes.append(
@@ -893,6 +953,7 @@ def afficher_assistant_hot_pronostics(
     lignes_recap: list | None = None,
     *,
     key_prefix: str = "hot",
+    df_point_all=None,
 ) -> None:
     """
     Boîte de question dans l'onglet Hot Pronostics NHL.
@@ -901,13 +962,15 @@ def afficher_assistant_hot_pronostics(
     st.subheader("💬 Pose une question")
     st.caption(
         "Exemples : « Donne-moi les 3 joueurs les plus susceptibles de marquer un but », "
-        "« Qui a le plus de chances d'offrir une passe ? », « Quels sont les favoris du jour ? »."
+        "« Qui a le plus de chances d'offrir une passe ? », "
+        "« Quels joueurs vont marquer un point ? », « Quels sont les favoris du jour ? »."
     )
 
     input_key = f"{key_prefix}_input_question"
     exemples = [
         "Donne-moi les 3 joueurs les plus susceptibles de marquer un but",
         "Quels sont les 5 meilleurs candidats pour une passe décisive ?",
+        "Quels joueurs sont les plus susceptibles de marquer un point ?",
         "Quels sont les favoris du jour ?",
         "Quels matchs sont plutôt Over ?",
     ]
@@ -935,7 +998,8 @@ def afficher_assistant_hot_pronostics(
         with st.container(border=True):
             st.markdown(
                 repondre_question_hot_pronostics(
-                    q, df_but_all, df_passe_all, df_victoires, lignes_recap
+                    q, df_but_all, df_passe_all, df_victoires, lignes_recap,
+                    df_point_all=df_point_all,
                 )
             )
 

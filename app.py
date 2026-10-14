@@ -3,7 +3,7 @@ Application d'Analyse Statistiques NHL (via api-web.nhle.com)
 ===================================================================
 Même structure que MLB / NPB / KBO :
   - Résumé du jour
-  - Hot Pronostics (buteurs, passeurs, totaux buts, écarts de points)
+  - Hot Pronostics (buteurs, passeurs, 1 point ou +, totaux buts, écarts)
   - Analyse par Équipe
   - Prédictions du jour
 
@@ -1001,6 +1001,20 @@ def _classer_passeurs(candidats: list) -> pd.DataFrame:
     return df.sort_values("Indice Passe (/100)", ascending=False).reset_index(drop=True)
 
 
+def _classer_pointeurs(candidats: list) -> pd.DataFrame:
+    """Joueurs les plus susceptibles de marquer au moins 1 point (but ou passe)."""
+    if not candidats:
+        return pd.DataFrame()
+    df = pd.DataFrame(candidats)
+    indice = (
+        _normaliser_colonne(df["points_10"]) * 0.50
+        + _normaliser_colonne(df["points_saison_pg"]) * 0.30
+        + _normaliser_colonne(df["gaa_adverse"]) * 0.20
+    ) * 100
+    df["Indice Point (/100)"] = indice.round(0)
+    return df.sort_values("Indice Point (/100)", ascending=False).reset_index(drop=True)
+
+
 def _top_recos_joueurs_match(df_all, home, away, indice_col, n: int = 3) -> list:
     """
     Top `n` joueurs déjà classés pour UNE confrontation (sans recalcul).
@@ -1079,14 +1093,19 @@ def _projeter_buts_equipes(abbr_home, abbr_away):
 # Hot Pronostics global
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=180)
-def construire_donnees_hot_pronostics_nhl(_cache_version: int = 2):
+def construire_donnees_hot_pronostics_nhl(_cache_version: int = 4):
     games, date_ref, source = obtenir_scores_du_jour()
     if not games:
-        return [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), date_ref, source
+        return (
+            [], pd.DataFrame(), pd.DataFrame(), pd.DataFrame(),
+            pd.DataFrame(), pd.DataFrame(), date_ref, source,
+            pd.DataFrame(), pd.DataFrame(),
+        )
 
     matchs = []
     candidats_but = []
     candidats_passe = []
+    candidats_point = []
     lignes_victoire = []
 
     for g in games:
@@ -1172,11 +1191,22 @@ def construire_donnees_hot_pronostics_nhl(_cache_version: int = 2):
                     "assists_saison_pg": s["assists_saison"] / gp_s,
                     "points_10": s["points_10"],
                 })
+                candidats_point.append({
+                    "Joueur": s["nom"],
+                    "Équipe": camp_name,
+                    "Adversaire": adv_name,
+                    "Poste": s["poste"],
+                    "points_10": s["points_10"],
+                    "points_saison_pg": s["points_saison"] / gp_s,
+                    "gaa_adverse": (gard_adv or {}).get("gaa") or 2.9,
+                })
 
     df_but_all = _classer_buteurs(candidats_but)
     df_passe_all = _classer_passeurs(candidats_passe)
+    df_point_all = _classer_pointeurs(candidats_point)
     df_top5_but = df_but_all.head(5).reset_index(drop=True) if not df_but_all.empty else df_but_all
     df_top5_passe = df_passe_all.head(5).reset_index(drop=True) if not df_passe_all.empty else df_passe_all
+    df_top5_point = df_point_all.head(5).reset_index(drop=True) if not df_point_all.empty else df_point_all
     df_victoires = pd.DataFrame(lignes_victoire)
 
     # Snapshot historique
@@ -1193,10 +1223,16 @@ def construire_donnees_hot_pronostics_nhl(_cache_version: int = 2):
         })
     _sauvegarder_predictions_du_jour(date_ref, matches_snapshot)
 
-    return matchs, df_top5_but, df_top5_passe, df_victoires, df_but_all, df_passe_all, date_ref, source
+    return (
+        matchs, df_top5_but, df_top5_passe, df_victoires,
+        df_but_all, df_passe_all, date_ref, source,
+        df_top5_point, df_point_all,
+    )
 
 
-def assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, df_but_all, df_passe_all) -> list:
+def assembler_lignes_recap_hot_pronostics(
+    matchs_jour, df_victoires, df_but_all, df_passe_all, df_point_all=None,
+) -> list:
     if not matchs_jour or df_victoires is None or getattr(df_victoires, "empty", True):
         return []
     ligne_ou = obtenir_ligne_over_under_saison()
@@ -1233,8 +1269,10 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, df_but_all,
 
         recos_but = _top_recos_joueurs_match(df_but_all, home, away, "Indice But (/100)", n=3)
         recos_passe = _top_recos_joueurs_match(df_passe_all, home, away, "Indice Passe (/100)", n=3)
+        recos_point = _top_recos_joueurs_match(df_point_all, home, away, "Indice Point (/100)", n=3)
         reco_but_txt, reco_but_detail = _formater_recos_joueurs_hot(recos_but)
         reco_passe_txt, reco_passe_detail = _formater_recos_joueurs_hot(recos_passe)
+        reco_point_txt, reco_point_detail = _formater_recos_joueurs_hot(recos_point)
 
         lignes.append({
             "confrontation": f"{away} vs {home}",
@@ -1254,6 +1292,9 @@ def assembler_lignes_recap_hot_pronostics(matchs_jour, df_victoires, df_but_all,
             "reco_run": reco_passe_txt,
             "reco_run_detail": reco_passe_detail,
             "reco_run_list": recos_passe,
+            "reco_point": reco_point_txt,
+            "reco_point_detail": reco_point_detail,
+            "reco_point_list": recos_point,
         })
     return lignes
 
@@ -1441,7 +1482,7 @@ def obtenir_match_du_jour(abbr: str):
 # ---------------------------------------------------------------------------
 render_page_header(
     "Analyse Statistiques NHL",
-    "Buteurs, passeurs, totaux de buts et écarts de points",
+    "Buteurs, passeurs, 1 point ou +, totaux de buts et écarts",
     league="nhl",
 )
 
@@ -1455,6 +1496,7 @@ with st.sidebar:
     st.markdown("""
     - **Buteur** : joueur susceptible de marquer un but
     - **Passeur** : joueur susceptible d'offrir une passe décisive
+    - **Point** : joueur susceptible de marquer au moins 1 point (but ou passe)
     - **GF / GA** : Buts pour / Buts contre
     - **GAA / SV%** : Moyenne de buts encaissés / % d'arrêts
     - **Écart** : différence de buts projetée (spread)
@@ -1518,15 +1560,16 @@ with onglets[1]:
     if onglets[1].open:
         render_section_title(
             "Hot Pronostics du jour",
-            "Buteurs, passeurs, totaux de buts et écarts de points — tous matchs",
+            "Buteurs, passeurs, points, totaux de buts et écarts — tous matchs",
         )
-        with st.spinner("Analyse des matchs NHL (forme L10, gardiens, top skaters)..."):
+        with st.spinner("Analyse des matchs NHL (forme L10, gardiens, compositions)..."):
             (
                 matchs_jour, df_top5_but, df_top5_passe, df_victoires,
                 df_but_all, df_passe_all, date_ref, source,
+                df_top5_point, df_point_all,
             ) = construire_donnees_hot_pronostics_nhl()
             lignes_recap = assembler_lignes_recap_hot_pronostics(
-                matchs_jour, df_victoires, df_but_all, df_passe_all
+                matchs_jour, df_victoires, df_but_all, df_passe_all, df_point_all
             )
 
         if source == "prochains":
@@ -1541,12 +1584,14 @@ with onglets[1]:
                 label_joueurs="Propositions du match (top 3)",
                 label_primary="🏒 Buteurs",
                 label_secondary="🎯 Passeurs",
+                label_tertiary="⭐ 1 point ou +",
                 show_ecart=True,
             )
             nb_lineups = sum(1 for m in matchs_jour if m.get("lineup_annoncee"))
             st.caption(
-                "Buteurs / Passeurs : uniquement les joueurs annoncés sur la feuille "
-                "de match, top 3 classé par indice de confiance (/100). "
+                "Buteurs / Passeurs / Points : uniquement les joueurs annoncés sur la "
+                "feuille de match, top 3 classé par indice de confiance (/100). "
+                "« 1 point ou + » = but ou passe décisive. "
                 f"Composition officielle publiée pour {nb_lineups} match(s) sur "
                 f"{len(matchs_jour)} (souvent 1 à 3h avant le coup d'envoi)."
             )
@@ -1561,7 +1606,8 @@ with onglets[1]:
 
             st.markdown("---")
             afficher_assistant_hot_pronostics(
-                df_but_all, df_passe_all, df_victoires, lignes_recap, key_prefix="nhl_hot"
+                df_but_all, df_passe_all, df_victoires, lignes_recap,
+                key_prefix="nhl_hot", df_point_all=df_point_all,
             )
 
             st.markdown("---")
@@ -1614,6 +1660,33 @@ with onglets[1]:
                         "Passes/match saison": st.column_config.NumberColumn(format="%.2f"),
                         "Indice Passe (/100)": st.column_config.ProgressColumn(
                             "Indice Passe (/100)", min_value=0, max_value=100, format="%.0f"
+                        ),
+                    },
+                )
+
+            st.subheader("⭐ Top 5 — 1 point ou plus")
+            if df_top5_point.empty:
+                st.info(
+                    "Aucune composition officielle n'est encore publiée, ou pas assez "
+                    "de skaters inscrits pour classer les pointeurs. Réessayez plus près "
+                    "de l'heure des matchs."
+                )
+            else:
+                st.dataframe(
+                    df_top5_point[[
+                        "Joueur", "Équipe", "Adversaire", "Poste",
+                        "points_10", "points_saison_pg", "gaa_adverse", "Indice Point (/100)",
+                    ]].rename(columns={
+                        "points_10": "Points (10 derniers)",
+                        "points_saison_pg": "Points/match saison",
+                        "gaa_adverse": "GAA gardien adv.",
+                    }),
+                    hide_index=True,
+                    column_config={
+                        "Points/match saison": st.column_config.NumberColumn(format="%.2f"),
+                        "GAA gardien adv.": st.column_config.NumberColumn(format="%.2f"),
+                        "Indice Point (/100)": st.column_config.ProgressColumn(
+                            "Indice Point (/100)", min_value=0, max_value=100, format="%.0f"
                         ),
                     },
                 )
