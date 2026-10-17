@@ -574,14 +574,34 @@ def _ids_scratches_match(game_id: int) -> set:
     return ids
 
 
+# Feuille NHL habillée = 12 attaquants + 6 défenseurs (hors gardiens).
+# Au-delà, `rosterSpots` FUT est un roster de voyage provisoire, pas la composition.
+_MAX_SKATERS_FEUILLE = 18
+
+
+def _feuille_skaters_officielle(skaters: list) -> list:
+    """
+    Ne garde une liste que si elle ressemble à une feuille habillée (≤ 18 skaters).
+    Un roster provisoire (19–22) sans scratches publiés ne doit jamais alimenter
+    les Hot Pronostics.
+    """
+    if not skaters:
+        return []
+    if len(skaters) > _MAX_SKATERS_FEUILLE:
+        return []
+    return list(skaters)
+
+
 @st.cache_data(show_spinner=False, ttl=180, max_entries=80)
-def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
+def obtenir_composition_match(game_id: int, _cache_version: int = 3) -> dict:
     """
     Feuille de match : skaters réellement habillés.
     1) boxscore `playerByGameStats` dès que le match a commencé (source la plus sûre)
     2) sinon `rosterSpots` du play-by-play (composition PRE)
     3) on retire toujours les scratches du right-rail
-    Vide tant que rien n'est publié (FUT). `_cache_version` invalide l'ancien cache.
+    4) on rejette tout camp avec > 18 skaters (roster provisoire FUT)
+    Vide tant que la composition officielle n'est pas publiée.
+    `_cache_version` invalide l'ancien cache.
     """
     vide = {"home": [], "away": [], "annoncee": False}
     if not game_id:
@@ -589,25 +609,30 @@ def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
 
     scratches = _ids_scratches_match(game_id)
     home, away = [], []
+    source_boxscore = False
 
     try:
         box = appeler_avec_retry(
             _get_json, f"{NHL_API}/gamecenter/{int(game_id)}/boxscore"
         )
         pbg = (box or {}).get("playerByGameStats") or {}
-        if pbg.get("homeTeam") or pbg.get("awayTeam"):
-            for camp, cible in (("homeTeam", "home"), ("awayTeam", "away")):
-                t = pbg.get(camp) or {}
-                liste = []
-                for groupe in ("forwards", "defense"):
-                    for pl in t.get(groupe) or []:
-                        item = _skater_depuis_feuille_api(pl)
-                        if item:
-                            liste.append(item)
-                if cible == "home":
-                    home = liste
-                else:
-                    away = liste
+        # Exiger des skaters réellement listés (pas seulement une clé homeTeam vide).
+        home_tmp, away_tmp = [], []
+        for camp, cible in (("homeTeam", "home"), ("awayTeam", "away")):
+            t = pbg.get(camp) or {}
+            liste = []
+            for groupe in ("forwards", "defense"):
+                for pl in t.get(groupe) or []:
+                    item = _skater_depuis_feuille_api(pl)
+                    if item:
+                        liste.append(item)
+            if cible == "home":
+                home_tmp = liste
+            else:
+                away_tmp = liste
+        if home_tmp or away_tmp:
+            home, away = home_tmp, away_tmp
+            source_boxscore = True
     except Exception:
         pass
 
@@ -634,6 +659,13 @@ def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
 
     home = [j for j in home if j["id"] not in scratches]
     away = [j for j in away if j["id"] not in scratches]
+
+    # Boxscore = joueurs qui ont (ou vont) jouer : on fait confiance même si
+    # le décompte est atypique (expulsions, etc.). rosterSpots PRE : strict.
+    if not source_boxscore:
+        home = _feuille_skaters_officielle(home)
+        away = _feuille_skaters_officielle(away)
+
     return {"home": home, "away": away, "annoncee": bool(home or away)}
 
 
@@ -1093,7 +1125,7 @@ def _projeter_buts_equipes(abbr_home, abbr_away):
 # Hot Pronostics global
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=180)
-def construire_donnees_hot_pronostics_nhl(_cache_version: int = 4):
+def construire_donnees_hot_pronostics_nhl(_cache_version: int = 5):
     games, date_ref, source = obtenir_scores_du_jour()
     if not games:
         return (
