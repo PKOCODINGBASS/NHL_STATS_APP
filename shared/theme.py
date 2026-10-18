@@ -328,25 +328,37 @@ def _afficher_carte_match_native(row: Mapping[str, Any]) -> None:
         )
 
 
-def afficher_cartes_matchs(df, *, show_table_fallback: bool = True, column_config=None) -> None:
+def afficher_cartes_matchs(
+    df,
+    *,
+    show_table_fallback: bool = True,
+    column_config=None,
+    colonnes_tableau=None,
+    titre_tableau: str = "Tableau — scores, buteurs et comparatif algo",
+) -> None:
     """
-    Affiche le tableau en direct (toujours visible) + des cartes match natives.
-    Le tableau n'est plus masqué dans un expander : c'est la vue principale live.
+    Affiche le tableau (toujours visible) + des cartes match natives.
+    `colonnes_tableau` limite les colonnes du tableau ; les cartes gardent la ligne complète.
     """
     if df is None or getattr(df, "empty", True):
         return
 
-    # --- Tableau en direct (vue principale, toujours visible) ---
+    # --- Tableau (vue principale, toujours visible) ---
     if show_table_fallback:
+        df_table = df
+        if colonnes_tableau:
+            presentes = [c for c in colonnes_tableau if c in getattr(df, "columns", [])]
+            if presentes:
+                df_table = df[presentes]
         st.markdown(
-            '<p class="ps-section-sub" style="margin:0.2rem 0 0.6rem 0;">'
-            "Tableau en direct — scores, statuts et comparatif algo</p>",
+            f'<p class="ps-section-sub" style="margin:0.2rem 0 0.6rem 0;">'
+            f"{_escape(titre_tableau)}</p>",
             unsafe_allow_html=True,
         )
         kwargs = {"hide_index": True, "use_container_width": True}
         if column_config is not None:
             kwargs["column_config"] = column_config
-        st.dataframe(df, **kwargs)
+        st.dataframe(df_table, **kwargs)
 
     # --- Cartes natives (complément visuel, sans HTML fragile) ---
     with st.expander("🃏 Vue cartes par match", expanded=False):
@@ -647,6 +659,15 @@ def afficher_tableau_recap_hot_pronostics(
                         row.get("reco_point") or "—",
                         row.get("reco_point_detail"),
                     )
+
+            comp_away = row.get("composition_away")
+            comp_home = row.get("composition_home")
+            if comp_away or comp_home:
+                with st.expander("Composition officielle"):
+                    if comp_away:
+                        st.markdown(comp_away)
+                    if comp_home:
+                        st.markdown(comp_home)
 
 
 def _extraire_n_question_hot(question: str, defaut: int = 3) -> int:

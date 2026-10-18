@@ -556,6 +556,24 @@ def _skater_depuis_feuille_api(obj: dict) -> dict | None:
     return {"id": pid, "nom": nom or "?", "poste": poste}
 
 
+# Règlement NHL : 18 patineurs habillés. Au-delà, rosterSpots est encore le
+# roster élargi (les joueurs en trop ne jouent pas). On ne propose personne
+# tant que la feuille n'est pas redescendue à 18 ou moins.
+_MAX_SKATERS_FEUILLE = 18
+
+
+def _classer_feuille(skaters: list) -> tuple:
+    """
+    Retourne (joueurs retenus, statut).
+    statut : officielle | non_publiee | absente
+    """
+    if not skaters:
+        return [], "absente"
+    if len(skaters) > _MAX_SKATERS_FEUILLE:
+        return [], "non_publiee"
+    return skaters, "officielle"
+
+
 def _ids_scratches_match(game_id: int) -> set:
     """IDs officiellement scratch (right-rail). Ex. Victor Olofsson à VGK."""
     ids = set()
@@ -574,21 +592,83 @@ def _ids_scratches_match(game_id: int) -> set:
     return ids
 
 
+def _abbr_equipe_api(team: dict | None) -> str:
+    return ((team or {}).get("abbrev") or "").upper()
+
+
+def _enrichir_noms_feuille(joueurs: list, abbr: str) -> list:
+    """Le boxscore ne donne souvent que « A. Ovechkin ». On reprend le nom complet."""
+    if not joueurs or not abbr:
+        return joueurs
+    try:
+        index = _index_skaters_club(abbr)
+    except Exception:
+        return joueurs
+    out = []
+    for j in joueurs:
+        row = index.get(j.get("id"))
+        nom = _nom_skater(row).strip() if row else ""
+        out.append({**j, "nom": nom or j.get("nom") or "?"})
+    return out
+
+
+def _texte_composition(joueurs: list, abbr: str, statut: str) -> str:
+    """Libellé lisible d'une feuille : avants et défense, ou motif d'absence."""
+    if statut == "non_publiee":
+        return (
+            f"**{abbr}** : composition non publiée "
+            "(roster encore trop large — ces joueurs ne sont pas proposés)"
+        )
+    if statut != "officielle" or not joueurs:
+        return f"**{abbr}** : composition non publiée"
+    def _noms(postes: set) -> str:
+        return ", ".join(
+            j.get("nom") or "?"
+            for j in joueurs
+            if (j.get("poste") or "").upper() in postes
+        )
+    avants = _noms({"C", "L", "R", "F", "W"})
+    defense = _noms({"D"})
+    connus = {"C", "L", "R", "F", "W", "D"}
+    autres = ", ".join(
+        j.get("nom") or "?"
+        for j in joueurs
+        if (j.get("poste") or "").upper() not in connus
+    )
+    morceaux = []
+    if avants:
+        morceaux.append(f"Avants — {avants}")
+    if defense:
+        morceaux.append(f"Défense — {defense}")
+    if autres:
+        morceaux.append(autres)
+    detail = " · ".join(morceaux) if morceaux else ", ".join(
+        j.get("nom") or "?" for j in joueurs
+    )
+    return f"**{abbr}** ({len(joueurs)} habillés) : {detail}"
+
+
 @st.cache_data(show_spinner=False, ttl=180, max_entries=80)
-def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
+def obtenir_composition_match(game_id: int, _cache_version: int = 4) -> dict:
     """
-    Feuille de match : skaters réellement habillés.
+    Feuille de match : skaters réellement habillés (18 max).
     1) boxscore `playerByGameStats` dès que le match a commencé (source la plus sûre)
     2) sinon `rosterSpots` du play-by-play (composition PRE)
-    3) on retire toujours les scratches du right-rail
-    Vide tant que rien n'est publié (FUT). `_cache_version` invalide l'ancien cache.
+    3) on retire les scratches du right-rail
+    4) un côté avec plus de 18 patineurs est ignoré : ce n'est pas encore la
+       feuille, seulement le roster élargi (joueurs qui ne joueront pas).
+    `_cache_version` invalide l'ancien cache.
     """
-    vide = {"home": [], "away": [], "annoncee": False}
+    vide = {
+        "home": [], "away": [], "annoncee": False,
+        "home_statut": "absente", "away_statut": "absente",
+    }
     if not game_id:
         return vide
 
     scratches = _ids_scratches_match(game_id)
     home, away = [], []
+    home_abbr = away_abbr = ""
 
     try:
         box = appeler_avec_retry(
@@ -596,6 +676,8 @@ def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
         )
         pbg = (box or {}).get("playerByGameStats") or {}
         if pbg.get("homeTeam") or pbg.get("awayTeam"):
+            home_abbr = _abbr_equipe_api(box.get("homeTeam"))
+            away_abbr = _abbr_equipe_api(box.get("awayTeam"))
             for camp, cible in (("homeTeam", "home"), ("awayTeam", "away")):
                 t = pbg.get(camp) or {}
                 liste = []
@@ -621,6 +703,8 @@ def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
         spots = data.get("rosterSpots") or []
         if not spots:
             return vide
+        home_abbr = home_abbr or _abbr_equipe_api(data.get("homeTeam"))
+        away_abbr = away_abbr or _abbr_equipe_api(data.get("awayTeam"))
         home_id = (data.get("homeTeam") or {}).get("id")
         away_id = (data.get("awayTeam") or {}).get("id")
         for sp in spots:
@@ -634,7 +718,17 @@ def obtenir_composition_match(game_id: int, _cache_version: int = 2) -> dict:
 
     home = [j for j in home if j["id"] not in scratches]
     away = [j for j in away if j["id"] not in scratches]
-    return {"home": home, "away": away, "annoncee": bool(home or away)}
+    home, home_statut = _classer_feuille(home)
+    away, away_statut = _classer_feuille(away)
+    home = _enrichir_noms_feuille(home, home_abbr)
+    away = _enrichir_noms_feuille(away, away_abbr)
+    return {
+        "home": home,
+        "away": away,
+        "annoncee": home_statut == "officielle" or away_statut == "officielle",
+        "home_statut": home_statut,
+        "away_statut": away_statut,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1093,7 +1187,7 @@ def _projeter_buts_equipes(abbr_home, abbr_away):
 # Hot Pronostics global
 # ---------------------------------------------------------------------------
 @st.cache_data(show_spinner=False, ttl=180)
-def construire_donnees_hot_pronostics_nhl(_cache_version: int = 4):
+def construire_donnees_hot_pronostics_nhl(_cache_version: int = 6):
     games, date_ref, source = obtenir_scores_du_jour()
     if not games:
         return (
@@ -1155,6 +1249,10 @@ def construire_donnees_hot_pronostics_nhl(_cache_version: int = 4):
             "buts_home_proj": None if buts_home is None else round(buts_home, 2),
             "buts_away_proj": None if buts_away is None else round(buts_away, 2),
             "lineup_annoncee": bool(comp.get("annoncee")),
+            "comp_home": comp.get("home") or [],
+            "comp_away": comp.get("away") or [],
+            "home_statut": comp.get("home_statut") or "absente",
+            "away_statut": comp.get("away_statut") or "absente",
         })
 
         # Uniquement les skaters inscrits sur la feuille officielle.
@@ -1267,12 +1365,17 @@ def assembler_lignes_recap_hot_pronostics(
         ecart = _ecart_points_predit(m.get("buts_home_proj"), m.get("buts_away_proj"))
         info_ecart = formater_ecart_points(ecart, home, away, pct_home, pct_away) or {}
 
-        recos_but = _top_recos_joueurs_match(df_but_all, home, away, "Indice But (/100)", n=3)
-        recos_passe = _top_recos_joueurs_match(df_passe_all, home, away, "Indice Passe (/100)", n=3)
-        recos_point = _top_recos_joueurs_match(df_point_all, home, away, "Indice Point (/100)", n=3)
-        reco_but_txt, reco_but_detail = _formater_recos_joueurs_hot(recos_but)
-        reco_passe_txt, reco_passe_detail = _formater_recos_joueurs_hot(recos_passe)
-        reco_point_txt, reco_point_detail = _formater_recos_joueurs_hot(recos_point)
+        if m.get("lineup_annoncee"):
+            recos_but = _top_recos_joueurs_match(df_but_all, home, away, "Indice But (/100)", n=3)
+            recos_passe = _top_recos_joueurs_match(df_passe_all, home, away, "Indice Passe (/100)", n=3)
+            recos_point = _top_recos_joueurs_match(df_point_all, home, away, "Indice Point (/100)", n=3)
+            reco_but_txt, reco_but_detail = _formater_recos_joueurs_hot(recos_but)
+            reco_passe_txt, reco_passe_detail = _formater_recos_joueurs_hot(recos_passe)
+            reco_point_txt, reco_point_detail = _formater_recos_joueurs_hot(recos_point)
+        else:
+            recos_but, recos_passe, recos_point = [], [], []
+            reco_but_txt = reco_passe_txt = reco_point_txt = "Composition non publiée"
+            reco_but_detail = reco_passe_detail = reco_point_detail = None
 
         lignes.append({
             "confrontation": f"{away} vs {home}",
@@ -1295,6 +1398,12 @@ def assembler_lignes_recap_hot_pronostics(
             "reco_point": reco_point_txt,
             "reco_point_detail": reco_point_detail,
             "reco_point_list": recos_point,
+            "composition_away": _texte_composition(
+                m.get("comp_away") or [], m.get("away_abbr") or "Ext", m.get("away_statut") or "absente",
+            ),
+            "composition_home": _texte_composition(
+                m.get("comp_home") or [], m.get("home_abbr") or "Dom", m.get("home_statut") or "absente",
+            ),
         })
     return lignes
 
@@ -1371,6 +1480,98 @@ def _obtenir_goals_landing(game_id: int, cache_bust: int = 0):
         return []
 
 
+def _proba_valide(valeur) -> bool:
+    if valeur is None:
+        return False
+    try:
+        return not pd.isna(valeur)
+    except TypeError:
+        return True
+
+
+def _ligne_resume_match(g: dict, pred: dict | None, cache_bust: int) -> dict:
+    """Une ligne du résumé : score, buteurs, passeurs, comparatif au favori prédit."""
+    home = g.get("homeTeam") or {}
+    away = g.get("awayTeam") or {}
+    home_abbr = (home.get("abbrev") or "").upper()
+    away_abbr = (away.get("abbrev") or "").upper()
+    teams = get_teams_nhl_dict()
+    home_name = teams.get(home_abbr, _texte_localise(home.get("name") or home.get("commonName")) or home_abbr)
+    away_name = teams.get(away_abbr, _texte_localise(away.get("name") or away.get("commonName")) or away_abbr)
+    statut = _statut_match(g.get("gameState"))
+    a_commence = statut in ("Terminé", "En cours")
+    hs = home.get("score")
+    as_ = away.get("score")
+    if a_commence and hs is not None and as_ is not None:
+        score_str = f"{away_abbr} {as_} - {home_abbr} {hs}"
+        total = int(as_) + int(hs)
+        ecart_reel = int(hs) - int(as_)
+        goals = g.get("goals")
+        if not goals:
+            goals = _obtenir_goals_landing(g.get("id"), cache_bust)
+        buteurs, passeurs = _aggreger_buteurs_passeurs(goals)
+        buteurs_str = _formater_cellule_joueurs_nhl(
+            away_abbr, buteurs.get(away_abbr, {}), home_abbr, buteurs.get(home_abbr, {})
+        )
+        passeurs_str = _formater_cellule_joueurs_nhl(
+            away_abbr, passeurs.get(away_abbr, {}), home_abbr, passeurs.get(home_abbr, {})
+        )
+    else:
+        score_str, total, ecart_reel = "—", "—", "—"
+        buteurs_str, passeurs_str = "—", "—"
+
+    comparatif, resultat = "—", "⏳"
+    if pred:
+        ph, pa = pred.get("proba_home"), pred.get("proba_away")
+        if _proba_valide(ph) and _proba_valide(pa):
+            fav = home_name if float(ph) >= float(pa) else away_name
+            comparatif = f"{fav} ({max(float(ph), float(pa)):.0f}%)"
+            if a_commence and hs is not None and as_ is not None:
+                if int(hs) == int(as_):
+                    resultat = "⏳"
+                else:
+                    meneur = home_name if int(hs) > int(as_) else away_name
+                    resultat = "✅" if meneur == fav else "❌"
+
+    _, heure_paris = _heure_paris_depuis_utc(g.get("startTimeUTC"))
+    return {
+        "Match": f"{away_name} @ {home_name}",
+        "Statut": statut if statut != "À venir" else f"À venir · {heure_paris}",
+        "Score": score_str,
+        "Total Buts": total,
+        "Buteurs": buteurs_str,
+        "Passeurs": passeurs_str,
+        "Écart": ecart_reel,
+        "Comparatif Prédiction": comparatif,
+        "Résultat vs Algo": resultat,
+    }
+
+
+def _predictions_historique(date_str: str) -> dict:
+    """Favoris enregistrés pour une date NHL (clé = game_id)."""
+    if not date_str:
+        return {}
+    historique = _charger_historique_predictions()
+    bloc = (historique or {}).get(date_str) or {}
+    out = {}
+    for m in bloc.get("matches") or []:
+        gid = _id_joueur_int(m.get("game_id"))
+        if gid is None:
+            continue
+        out[gid] = {
+            "proba_home": m.get("proba_home"),
+            "proba_away": m.get("proba_away"),
+        }
+    return out
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=8)
+def _scoreboard_nhl(date_str: str):
+    if not date_str:
+        return {}
+    return appeler_avec_retry(_get_json, f"{NHL_API}/score/{date_str}") or {}
+
+
 @st.cache_data(show_spinner=False, ttl=300)
 def construire_resume_matchs_du_jour(cache_bust: int = 0):
     games, date_ref, source = obtenir_scores_du_jour()
@@ -1385,65 +1586,36 @@ def construire_resume_matchs_du_jour(cache_bust: int = 0):
     pred_by_id = {}
     for idx, m in enumerate(matchs_hot or []):
         if idx < len(df_victoires):
-            pred_by_id[m.get("game_id")] = df_victoires.iloc[idx]
+            row = df_victoires.iloc[idx]
+            pred_by_id[_id_joueur_int(m.get("game_id"))] = {
+                "proba_home": row.get("Proba Domicile (%)"),
+                "proba_away": row.get("Proba Extérieur (%)"),
+            }
+    # Repli historique si les hot pronos du jour ne couvrent pas le match.
+    for gid, pred in _predictions_historique(date_ref).items():
+        pred_by_id.setdefault(gid, pred)
 
-    lignes = []
-    for g in games:
-        home = g.get("homeTeam") or {}
-        away = g.get("awayTeam") or {}
-        home_abbr = (home.get("abbrev") or "").upper()
-        away_abbr = (away.get("abbrev") or "").upper()
-        teams = get_teams_nhl_dict()
-        home_name = teams.get(home_abbr, _texte_localise(home.get("name") or home.get("commonName")) or home_abbr)
-        away_name = teams.get(away_abbr, _texte_localise(away.get("name") or away.get("commonName")) or away_abbr)
-        statut = _statut_match(g.get("gameState"))
-        a_commence = statut in ("Terminé", "En cours")
-        hs = home.get("score")
-        as_ = away.get("score")
-        if a_commence and hs is not None and as_ is not None:
-            score_str = f"{away_abbr} {as_} - {home_abbr} {hs}"
-            total = int(as_) + int(hs)
-            ecart_reel = int(hs) - int(as_)
-            goals = g.get("goals")
-            if not goals:
-                goals = _obtenir_goals_landing(g.get("id"), cache_bust)
-            buteurs, passeurs = _aggreger_buteurs_passeurs(goals)
-            buteurs_str = _formater_cellule_joueurs_nhl(
-                away_abbr, buteurs.get(away_abbr, {}), home_abbr, buteurs.get(home_abbr, {})
-            )
-            passeurs_str = _formater_cellule_joueurs_nhl(
-                away_abbr, passeurs.get(away_abbr, {}), home_abbr, passeurs.get(home_abbr, {})
-            )
-        else:
-            score_str, total, ecart_reel = "—", "—", "—"
-            buteurs_str, passeurs_str = "—", "—"
-
-        pred = pred_by_id.get(g.get("id"))
-        if pred is not None:
-            ph, pa = pred.get("Proba Domicile (%)"), pred.get("Proba Extérieur (%)")
-            fav = home_name if ph >= pa else away_name
-            comparatif = f"{fav} ({max(ph, pa):.0f}%)"
-            if a_commence and hs is not None and as_ is not None:
-                meneur = home_name if int(hs) > int(as_) else (away_name if int(as_) > int(hs) else None)
-                resultat = "⏳" if meneur is None else ("✅" if meneur == fav else "❌")
-            else:
-                resultat = "⏳"
-        else:
-            comparatif, resultat = "—", "⏳"
-
-        _, heure_paris = _heure_paris_depuis_utc(g.get("startTimeUTC"))
-        lignes.append({
-            "Match": f"{away_name} @ {home_name}",
-            "Statut": statut if statut != "À venir" else f"À venir · {heure_paris}",
-            "Score": score_str,
-            "Total Buts": total,
-            "Buteurs": buteurs_str,
-            "Passeurs": passeurs_str,
-            "Écart": ecart_reel,
-            "Comparatif Prédiction": comparatif,
-            "Résultat vs Algo": resultat,
-        })
+    lignes = [_ligne_resume_match(g, pred_by_id.get(_id_joueur_int(g.get("id"))), cache_bust) for g in games]
     return pd.DataFrame(lignes), None, date_ref, source
+
+
+@st.cache_data(show_spinner=False, ttl=300)
+def construire_resume_veille(cache_bust: int = 0):
+    """Résumé de la veille NHL (date précédente du scoreboard, heure de l'Est)."""
+    date_jour = datetime.now(TZ_EASTERN).strftime("%Y-%m-%d")
+    board = _scoreboard_nhl(date_jour)
+    date_veille = (board or {}).get("prevDate")
+    if not date_veille:
+        try:
+            date_veille = (datetime.strptime(date_jour, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        except Exception:
+            return pd.DataFrame(), "Date de la veille indisponible.", None
+    games = (_scoreboard_nhl(date_veille) or {}).get("games") or []
+    if not games:
+        return pd.DataFrame(), None, date_veille
+    pred_by_id = _predictions_historique(date_veille)
+    lignes = [_ligne_resume_match(g, pred_by_id.get(_id_joueur_int(g.get("id"))), cache_bust) for g in games]
+    return pd.DataFrame(lignes), None, date_veille
 
 
 def obtenir_match_du_jour(abbr: str):
@@ -1514,6 +1686,33 @@ onglets = st.tabs([
     "🔮 Prédictions du jour",
 ], on_change="rerun")
 
+_COLONNES_RESUME = [
+    "Match", "Score", "Buteurs", "Passeurs", "Comparatif Prédiction", "Résultat vs Algo",
+]
+_CONFIG_RESUME = {
+    "Match": st.column_config.TextColumn("Match", width="medium"),
+    "Score": st.column_config.TextColumn("Score", width="small"),
+    "Buteurs": st.column_config.TextColumn("Buteurs", width="large"),
+    "Passeurs": st.column_config.TextColumn("Passeurs", width="large"),
+    "Comparatif Prédiction": st.column_config.TextColumn("Comparatif Prédiction", width="medium"),
+    "Résultat vs Algo": st.column_config.TextColumn("Résultat vs Algo", width="small"),
+}
+
+
+def _afficher_bloc_resume(df, *, titre_tableau: str) -> None:
+    afficher_cartes_matchs(
+        df,
+        show_table_fallback=True,
+        colonnes_tableau=_COLONNES_RESUME,
+        titre_tableau=titre_tableau,
+        column_config=_CONFIG_RESUME,
+    )
+    st.caption(
+        "Buteurs / Passeurs : joueurs qui ont marqué ou offert une passe "
+        "(affichés une fois le match commencé)."
+    )
+
+
 # ---- Résumé ----
 with onglets[0]:
     if onglets[0].open:
@@ -1535,24 +1734,24 @@ with onglets[0]:
         elif df_resume.empty:
             st.info("Aucun match NHL à afficher pour le moment.")
         else:
-            afficher_cartes_matchs(
-                df_resume,
-                show_table_fallback=True,
-                column_config={
-                    "Match": st.column_config.TextColumn("Match", width="medium"),
-                    "Statut": st.column_config.TextColumn("Statut", width="medium"),
-                    "Score": st.column_config.TextColumn("Score", width="small"),
-                    "Total Buts": st.column_config.TextColumn("Total Buts", width="small"),
-                    "Buteurs": st.column_config.TextColumn("Buteurs", width="large"),
-                    "Passeurs": st.column_config.TextColumn("Passeurs", width="large"),
-                    "Écart": st.column_config.TextColumn("Écart", width="small"),
-                    "Comparatif Prédiction": st.column_config.TextColumn("Comparatif Prédiction", width="medium"),
-                    "Résultat vs Algo": st.column_config.TextColumn("Résultat vs Algo", width="small"),
-                },
+            _afficher_bloc_resume(df_resume, titre_tableau="Tableau du jour — scores, buteurs et comparatif algo")
+
+        st.markdown("---")
+        render_section_title("Résumé de la veille", "Même lecture, sur la date NHL précédente")
+        with st.spinner("Récupération des scores de la veille..."):
+            df_veille, err_veille, date_veille = construire_resume_veille(
+                st.session_state.resume_cache_bust
             )
-            st.caption(
-                "Buteurs / Passeurs : joueurs qui ont marqué ou offert une passe "
-                "(affichés une fois le match commencé)."
+        if date_veille:
+            st.caption(f"Date de référence (heure de l'Est) : {date_veille}")
+        if err_veille:
+            st.error(err_veille)
+        elif df_veille is None or df_veille.empty:
+            st.info("Aucun match NHL à afficher pour la veille.")
+        else:
+            _afficher_bloc_resume(
+                df_veille,
+                titre_tableau="Tableau de la veille — scores, buteurs et comparatif algo",
             )
 
 # ---- Hot Pronostics ----
@@ -1589,11 +1788,12 @@ with onglets[1]:
             )
             nb_lineups = sum(1 for m in matchs_jour if m.get("lineup_annoncee"))
             st.caption(
-                "Buteurs / Passeurs / Points : uniquement les joueurs annoncés sur la "
-                "feuille de match, top 3 classé par indice de confiance (/100). "
+                "Buteurs / Passeurs / Points : uniquement les patineurs habillés "
+                "(18 maximum par équipe). Un roster plus large est ignoré : il contient "
+                "encore des joueurs qui ne joueront pas. "
                 "« 1 point ou + » = but ou passe décisive. "
                 f"Composition officielle publiée pour {nb_lineups} match(s) sur "
-                f"{len(matchs_jour)} (souvent 1 à 3h avant le coup d'envoi)."
+                f"{len(matchs_jour)}."
             )
             st.caption(
                 "Totaux (O/U) : somme des buts projetés des 2 équipes vs ligne saison. "
@@ -1949,16 +2149,32 @@ with onglets[3]:
             else:
                 st.caption("Projection match indisponible.")
 
+        st.subheader("📋 Composition")
+        col_ext, col_dom = st.columns(2)
+        with col_ext:
+            st.markdown(_texte_composition(
+                (comp_pred or {}).get("away") or [],
+                match.get("away_abbr") or "Ext",
+                (comp_pred or {}).get("away_statut") or "absente",
+            ))
+        with col_dom:
+            st.markdown(_texte_composition(
+                (comp_pred or {}).get("home") or [],
+                match.get("home_abbr") or "Dom",
+                (comp_pred or {}).get("home_statut") or "absente",
+            ))
+
         st.subheader("⭐ Joueurs à surveiller")
         if not feuille:
             st.info(
-                "Composition pas encore publiée pour ce match : aucune proposition joueur. "
-                "Seuls les skaters inscrits sur la feuille officielle sont retenus."
+                "Composition pas encore publiée pour cette équipe : aucune proposition joueur. "
+                "Seuls les patineurs habillés (18 maximum) sont retenus. "
+                "Tant que le roster dépasse 18, des joueurs qui ne joueront pas y figurent encore."
             )
         elif not joueurs:
             st.info("Pas assez de données joueurs parmi la composition annoncée.")
         else:
-            st.caption("Uniquement les joueurs annoncés sur la feuille de match.")
+            st.caption("Uniquement les patineurs habillés sur la feuille de match.")
             st.dataframe(pd.DataFrame(joueurs), hide_index=True)
 
 render_footer("NHL", datetime.now(TZ_PARIS).strftime("%d/%m/%Y %H:%M"))
